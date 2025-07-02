@@ -1,0 +1,58 @@
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">  <!-- ✅ 黑色背景 -->
+
+    <!-- ✅ 修改 VideoView：wrap_content + 居中 -->
+    <VideoView
+        android:id="@+id/videoView"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center" />
+
+    <!-- 控制状态展示文字（不变） -->
+    <LinearLayout
+        android:orientation="vertical"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:background="#66000000"
+        android:padding="8dp">
+
+        <TextView
+            android:id="@+id/tvVideoAction"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Video Action: "
+            android:textSize="18sp"
+            android:textColor="#FFDD00" />
+
+        <TextView
+            android:id="@+id/tvAudioAction"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Audio Action: "
+            android:textSize="18sp"
+            android:textColor="#00DDEE" />
+
+        <TextView
+            android:id="@+id/tvOverlay"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Final Action: "
+            android:textSize="20sp"
+            android:textColor="#FF0000" />
+    </LinearLayout>
+
+    <!-- 全屏切换按钮 -->
+    <ImageButton
+        android:id="@+id/btnFullscreen"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="16dp"
+        android:background="@android:color/transparent"
+        android:src="@drawable/ic_fullscreen"
+        android:contentDescription="全屏切换按钮" />
+</FrameLayout>
