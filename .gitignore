@@ -1,0 +1,32 @@
+# === Gradle & Build ===
+.gradle/
+build/
+output-metadata.json
+
+# === Local Configuration ===
+local.properties
+
+# === IDE (Android Studio / IntelliJ) ===
+.idea/
+*.iml
+
+# === Native Build (CMake / NDK) ===
+.externalNativeBuild/
+.cxx/
+
+# === Generated Artifacts ===
+*.apk
+*.aab
+captures/
+
+# === Logs & Profiling ===
+*.log
+*.hprof
+
+# === Keystore & Secrets ===
+*.jks
+*.keystore
+google-services.json
+
+# === macOS ===
+.DS_Store
