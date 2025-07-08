@@ -94,7 +94,7 @@ public class InferenceHelper {
         }
 
         // [新增] 置信度计算相关常量
-        final float POINT_CONF_THRES = 0.5f;                       // 单点置信度阈值
+        final float POINT_CONF_THRES = 0.4f;                       // 单点置信度阈值
         final float FRAME_PASS_RATIO = 0.5f;                       // 通过比例阈值（50%）
         final int   COCO_KPT_NUM     = 17;                         // COCO 关键点数量
         final int   FRAME_PASS_CNT   = Math.round(COCO_KPT_NUM * FRAME_PASS_RATIO); // 17×0.5=12
@@ -159,8 +159,8 @@ public class InferenceHelper {
 
     /**
      * Tiny-ST-GCN++ 二分类器
-     * @param poseWindow  [T=8][V=17][C=3] 顺序的关键点数组
-     * @return            Sigmoid 概率 (1 = 目标动作, 0 = Background)
+     * @param poseWindow [T=8][V=17][C=3]
+     * @return 目标动作(label 0) 的概率 ∈ [0,1]
      */
     public float runBinary(float[][][] poseWindow) {
         if (tinyBinSession == null) {
@@ -181,11 +181,17 @@ public class InferenceHelper {
 
             // 3) 推理
             OrtSession.Result res = tinyBinSession.run(Collections.singletonMap("input", inTensor));
-            float[][] logits = (float[][]) res.get(0).getValue();   // [1][1] or [1][2] 皆可
 
-            // 4) 取 logit[0] 并做 Sigmoid
-            float logit = logits[0][0];
-            float prob  = 1f / (1f + (float) Math.exp(-logit));
+            /* 4.  计算目标类(label 0) 概率 */
+            // 取出 batch=0 的两维 logit
+            float[] logits = ((float[][]) res.get(0).getValue())[0]; // logits.length == 2
+            float logit0   = logits[0];      // label 0 的原始分数
+            float logit1   = logits[1];      // label 1 的原始分数
+            // 数值安全 Softmax → 取 label 0 概率
+            float maxLogit = logit0 > logit1 ? logit0 : logit1;      // 与 Math.max 等价
+            double exp0    = Math.exp(logit0 - maxLogit);
+            double exp1    = Math.exp(logit1 - maxLogit);
+            float prob     = (float) (exp0 / (exp0 + exp1));         // label 0 概率
 
             // 5) 资源释放
             res.close();
@@ -198,6 +204,18 @@ public class InferenceHelper {
     }
 
 
+    /**
+     * ST-GCN++ 多分类器
+     * @param poseWindow [T=32][V=17][C=3]
+     * @return 第一个（也是唯一一个）样本的预测结果
+     * outputArray 是一个二维数组 float[][]
+     * 第一维是 batch size（这里固定为 1）
+     * 第二维是类别数（这里是 N 个类别：0, 1, 2,..., N）
+     * outputArray[0] 的含义：
+     * 由于 batch size = 1，所以 outputArray[0] 代表第一个（也是唯一一个）样本的预测结果
+     * 它是一个长度为 N 的一维数组，包含 N 个 logit 值
+     * 每个值对应一个动作类别的未归一化分数
+     */
     public float[] runStgcnModel(float[][][] poseWindow) {
         try {
             float[] input = new float[STGCN_BATCH * STGCN_CHANNEL * STGCN_TIME * STGCN_VERTEX * STGCN_M];

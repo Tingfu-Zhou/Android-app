@@ -49,11 +49,6 @@ public class VideoProcessActivity extends AppCompatActivity {
     private BluetoothHelper bluetoothHelper;
     private Handler playStateHandler;          // 轮询播放状态
     private Runnable playStateChecker;         // 对应的 Runnable
-
-
-    // ✅ 动作类别
-    private final String[] actionClasses = {"dofast", "doslow", "oral", "Noise"};
-
     private Handler frameHandler;
     private Runnable frameRunnable;
 
@@ -76,8 +71,8 @@ public class VideoProcessActivity extends AppCompatActivity {
     private ImageButton btnFullscreen;
     private volatile boolean isAnalysisPaused = false;  // 控制是否暂停同步分析
     // 对每个关键点的 x, y 坐标做归一化处理时使用
-    private static final int TARGET_WIDTH = 480;
-    private static final int TARGET_HEIGHT = 360;
+    private static final int TARGET_WIDTH = 720;
+    private static final int TARGET_HEIGHT = 480;
 
 
     @Override
@@ -283,7 +278,20 @@ public class VideoProcessActivity extends AppCompatActivity {
     private final ArrayDeque<float[][]> poseWindow8 = new ArrayDeque<>();
     // Binary-ST-GCN++ 推理阈值
     private static final float BINARY_TH = 0.29f;
-
+    // ✅ 动作类别
+    //private final String[] actionClasses = {"dofast", "doslow", "oral", "Noise"};
+    // ✅ 动作类别（共 9 类；下标 = label）
+    private final String[] actionClasses = {
+            "Oral-Kneel",         // label 0
+            "Oral-Lie",           // label 1
+            "Missionary",         // label 2
+            "Doggy",              // label 3
+            "Cowgirl",            // label 4
+            "Standing Rear",      // label 5
+            "Noise-Stand/Walk",   // label 6
+            "Noise-Sit",          // label 7
+            "Noise-Lie"           // label 8
+    };
 
     private void startSynchronizedVideoAnalysis() {
         Log.d(TAG, "启动同步视频分析主循环...");
@@ -330,6 +338,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                         long tMMPoseStart = System.currentTimeMillis();
 
                         inferenceHelper.runPoseModelViaMLKit(frame, keypointsRaw -> {
+                            boolean skipMulti = false; // 用于二分器跳过本轮视频分析
                             long tMMPoseEnd = System.currentTimeMillis();
                             Log.d(TAG, "[计时] 🦴 MLKit 关键点检测耗时: " + (tMMPoseEnd - tMMPoseStart) + " ms");
 
@@ -362,63 +371,83 @@ public class VideoProcessActivity extends AppCompatActivity {
                                     long tStgcnEnd = System.currentTimeMillis();
                                     Log.d(TAG, "[计时] 🧠 二分类ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
                                     if (prob < BINARY_TH) {
-                                        Log.d(TAG, "[同步分析] p=" + prob + " < TH，判定为 Background，跳过后级");
-                                        return; // ✋ 直接结束本轮视频分析
+                                        Log.d(TAG, "[同步分析] p=" + prob + " < TH，判定为 Background，跳过后续视频分析");
+                                        runOnUiThread(() -> tvVideoAction.setText(
+                                                String.format("Video Action: Background")
+                                        ));
+                                        // return; // ✋ 直接结束本轮分析
+                                        skipMulti = true;
                                     }
                                     Log.d(TAG, "[同步分析] p=" + prob + " ≥ TH，送入多类 ST-GCN++");
                                 }
 
-                                // 多分类的ST-GCN++
-                                poseWindow.add(keypoints);
-                                if (poseWindow.size() > WINDOW_SIZE) poseWindow.poll();
-                                // 累积帧计数
-                                framesSinceLastMulti++;
-                                // 多分类的ST-GCN++ 触发条件：窗口满且已累积 ≥ MULTI_STEP 帧
-                                if (poseWindow.size() == WINDOW_SIZE && framesSinceLastMulti >= MULTI_STEP) {
-                                    // 归零计数器，开始一次多分类推理
-                                    framesSinceLastMulti = 0;
-                                    // ⏱️ 添加数据准备计时
-                                    long tPrepStart = System.currentTimeMillis();
-                                    float[][][] input = convertPoseWindowToInput(poseWindow);
-                                    long tPrepEnd = System.currentTimeMillis();
-                                    Log.d(TAG, "[计时] 📊 ST-GCN输入准备耗时: " + (tPrepEnd - tPrepStart) + " ms");
 
-                                    long tStgcnStart = System.currentTimeMillis();
-                                    float[] scores = inferenceHelper.runStgcnModel(input); // ST-GCN++ 进行动作推理
-                                    long tStgcnEnd = System.currentTimeMillis();
-                                    Log.d(TAG, "[计时] 🧠 ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
+                                /* --------------------- 多分类的 ST-GCN++ --------------------- */
+                                // 仅当非 Background 时才继续累计 & 推理
+                                if (!skipMulti) {
+                                    poseWindow.add(keypoints);
+                                    if (poseWindow.size() > WINDOW_SIZE) poseWindow.poll();
+                                    // 累积帧计数
+                                    framesSinceLastMulti++;
+                                    // 多分类的ST-GCN++ 触发条件：窗口满且已累积 ≥ MULTI_STEP 帧
+                                    if (poseWindow.size() == WINDOW_SIZE && framesSinceLastMulti >= MULTI_STEP) {
+                                        // 归零计数器，开始一次多分类推理
+                                        framesSinceLastMulti = 0;
+                                        // ⏱️ 添加数据准备计时
+                                        long tPrepStart = System.currentTimeMillis();
+                                        float[][][] input = convertPoseWindowToInput(poseWindow);
+                                        long tPrepEnd = System.currentTimeMillis();
+                                        Log.d(TAG, "[计时] 📊 ST-GCN输入准备耗时: " + (tPrepEnd - tPrepStart) + " ms");
 
-                                    if (scores != null) {
-                                        //Log.d(TAG, "[同步分析] 原始 logits: " + Arrays.toString(scores));
-                                        //采用置信度阈值法，若最大概率 < 阈值 T（如0.5），则强制判为 004"杂音"类别,否则按照原有 argmax 判别类别。
-                                        // ⏱️ 添加后处理计时
-                                        long tPostStart = System.currentTimeMillis();
-                                        float threshold = 0.5f; // 置信度阈值，可自定义
-                                        float[] probs = softmax(scores);
-                                        Log.d(TAG, "[同步分析] softmax 概率分布: " + Arrays.toString(probs));
-                                        int bestIndex = argMax(probs);
-                                        float bestScore = probs[bestIndex];
-                                        String actionClass;
-                                        if (bestScore < threshold) {
-                                            // 判定为"杂音"类别
-                                            actionClass = actionClasses[3]; // 假设004杂音在下标3
-                                            bestIndex = 3;
-                                            Log.d(TAG, "[同步分析] 最大概率 " + bestScore + " < 阈值 " + threshold + "，判为杂音 (004)");
-                                        } else {
-                                            actionClass = actionClasses[bestIndex];
-                                            Log.d(TAG, "[同步分析] 动作识别概率分布: " + Arrays.toString(probs));
+                                        long tStgcnStart = System.currentTimeMillis();
+                                        float[] scores = inferenceHelper.runStgcnModel(input); // ST-GCN++ 进行动作推理
+                                        long tStgcnEnd = System.currentTimeMillis();
+                                        Log.d(TAG, "[计时] 🧠 ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
+
+                                        if (scores != null) {
+                                            // ……（原有后处理逻辑保持不变）
+                                            //采用置信度阈值法，若最大概率 < 阈值 T（如0.5），则强制判为"杂音"类别,否则按照原有 argmax 判别类别。
+                                            // ⏱️ 添加后处理计时
+                                            long tPostStart = System.currentTimeMillis();
+                                            float threshold = 0.5f; // 置信度阈值，可自定义
+                                            float[] probs = softmax(scores);
+                                            Log.d(TAG, "[同步分析] softmax 概率分布: " + Arrays.toString(probs));
+                                            int bestIndex = argMax(probs);
+                                            float bestScore = probs[bestIndex];
+
+                                            /* -------- 7.5更新: 判断是否属于噪音三类 -------- */
+                                            boolean isNoiseLabel = (bestIndex >= 6);     // 6,7,8 都是噪音
+                                            boolean isLowConf    = (bestScore < threshold);
+
+                                            /* -------- 新增 ②: 综合判定 -------- */
+                                            String actionClass;
+                                            if (isNoiseLabel || isLowConf) {             // 任一条件满足 → 统一当 Noise
+                                                bestIndex   = 6;                         // “默认”映射为 stand/walk，可自定
+                                                actionClass = actionClasses[bestIndex];
+                                                Log.d(TAG, String.format(
+                                                        "[同步分析] Noise 判定 (label=%d, p=%.3f, 低置信=%b)",
+                                                        bestIndex, bestScore, isLowConf));
+                                            } else {
+                                                actionClass = actionClasses[bestIndex];
+                                                Log.d(TAG, "[同步分析] 动作识别概率分布: " + Arrays.toString(probs));
+                                            }
+
+                                            latestVideoAction = actionClass;
+                                            long tPostEnd = System.currentTimeMillis();
+                                            Log.d(TAG, "[计时] 📈 动作分类后处理耗时: " + (tPostEnd - tPostStart) + " ms");
+
+                                            runOnUiThread(() -> tvVideoAction.setText(
+                                                    String.format("Video Action: %s (p=%.2f)", actionClass, bestScore)
+                                            ));
+
                                         }
-                                        latestVideoAction = actionClass;
-                                        long tPostEnd = System.currentTimeMillis();
-                                        Log.d(TAG, "[计时] 📈 动作分类后处理耗时: " + (tPostEnd - tPostStart) + " ms");
-
-                                        runOnUiThread(() -> tvVideoAction.setText(
-                                                String.format("Video Action: %s (p=%.2f)", actionClass, bestScore)
-                                        ));
                                     }
+                                } else { // ★ 修改 2：若被判为 Background，清空窗口 & 重置计数
+                                    poseWindow.clear();
+                                    framesSinceLastMulti = 0;
                                 }
+                                /* ------------------------------------------------------------ */
                             }
-
                             // ⏱️ 记录视频分析总耗时
                             long tVideoTotal = System.currentTimeMillis() - tMMPoseStart;
                             Log.d(TAG, "[计时] 📹 视频分析总耗时(含异步): " + tVideoTotal + " ms");
