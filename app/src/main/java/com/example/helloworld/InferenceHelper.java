@@ -95,9 +95,9 @@ public class InferenceHelper {
 
         // [新增] 置信度计算相关常量
         final float POINT_CONF_THRES = 0.4f;                       // 单点置信度阈值
-        final float FRAME_PASS_RATIO = 0.5f;                       // 通过比例阈值（50%）
+        final float FRAME_PASS_RATIO = 0.4f;                       // 通过比例阈值（40%）
         final int   COCO_KPT_NUM     = 17;                         // COCO 关键点数量
-        final int   FRAME_PASS_CNT   = Math.round(COCO_KPT_NUM * FRAME_PASS_RATIO); // 17×0.5=12
+        final int   FRAME_PASS_CNT   = Math.round(COCO_KPT_NUM * FRAME_PASS_RATIO); // 17×0.4=7
 
         InputImage image = InputImage.fromBitmap(bitmap, 0);
 

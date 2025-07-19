@@ -16,6 +16,9 @@ import androidx.appcompat.app.AppCompatActivity;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -60,6 +63,28 @@ public class VideoProcessActivity extends AppCompatActivity {
     private final AtomicReference<Long> latestVideoTimestamp = new AtomicReference<>(0L);
     private final AtomicReference<Long> latestAudioTimestamp = new AtomicReference<>(0L);
 
+    // 7.19 新增：时间窗口平滑相关变量
+    private static final int SMOOTH_WINDOW_SIZE = 5; // 500ms的平滑窗口（每100ms一次，5次=500ms）
+    private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
+    private final Object historyLock = new Object(); // 用于同步访问actionHistory
+
+    // 7.19 新增：内部类定义动作记录
+    private static class ActionRecord {
+        String videoAction;
+        String audioAction;
+        float videoConfidence;
+        float audioConfidence;
+        long timestamp;
+
+        ActionRecord(String vAction, String aAction, float vConf, float aConf) {
+            this.videoAction = vAction != null ? vAction : "";
+            this.audioAction = aAction != null ? aAction : "";
+            this.videoConfidence = vConf;
+            this.audioConfidence = aConf;
+            this.timestamp = System.currentTimeMillis();
+        }
+    }
+
     // ✅ 音频分析计时
     private long audioStartTime = 0;
     private boolean isAudioCompleted = false;
@@ -101,15 +126,14 @@ public class VideoProcessActivity extends AppCompatActivity {
 
     // 动作类别
     private final String[] actionClasses = {
-            "Oral-Kneel",         // label 0
-            "Oral-Lie",           // label 1
+            "Oral-full",          // label 0
+            "Oral-close up",      // label 1
             "Missionary",         // label 2
             "Doggy",              // label 3
             "Cowgirl",            // label 4
             "Standing Rear",      // label 5
             "Noise-Stand/Walk",   // label 6
-            "Noise-Sit",          // label 7
-            "Noise-Lie"           // label 8
+            "Noise-Sit"           // label 7
     };
 
     @Override
@@ -319,7 +343,10 @@ public class VideoProcessActivity extends AppCompatActivity {
                                     Log.d(TAG, "[视频线程] 收到帧数据，抽帧耗时: " + (frameReadyTime - t0) + "ms");
 
                                     // ML Kit姿态检测（异步）
+                                    long tMMPoseStart = System.currentTimeMillis();
                                     inferenceHelper.runPoseModelViaMLKit(frame, keypointsRaw -> {
+                                        long tMMPoseEnd = System.currentTimeMillis();
+                                        Log.d(TAG, "[计时] 🦴 MLKit 关键点检测耗时: " + (tMMPoseEnd - tMMPoseStart) + " ms");
                                         // 这个回调可能在任意线程执行，需要同步
                                         processVideoFrame(keypointsRaw);
                                     });
@@ -402,22 +429,22 @@ public class VideoProcessActivity extends AppCompatActivity {
                     Log.d(TAG, "[计时] [视频线程] 🧠 ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
 
                     if (scores != null) {
-                        //采用置信度阈值法，若最大概率 < 阈值 T（如0.5），则强制判为"杂音"类别,否则按照原有 argmax 判别类别。
-                        float threshold = 0.5f;
+                        //采用置信度阈值法，若最大概率 < 阈值 T（如0.3），则强制判为"杂音"类别,否则按照原有 argmax 判别类别。
+                        float threshold = 0.3f;
                         float[] probs = softmax(scores);
                         int bestIndex = argMax(probs);
                         float bestScore = probs[bestIndex];
 
-                        boolean isNoiseLabel = (bestIndex >= 6); // 6,7,8 都是噪音
+                        boolean isNoiseLabel = (bestIndex >= 6); // 6,7 都是噪音
                         boolean isLowConf = (bestScore < threshold);
 
                         String actionClass;
                         if (isNoiseLabel || isLowConf) { // 任一条件满足 → 统一当 Noise
+                            Log.d(TAG, String.format(
+                                    "[同步分析] 判定为 Noise (label=%d, p=%.3f, 低置信=%b)",
+                                    bestIndex, bestScore, isLowConf));
                             bestIndex = 6; // “默认”映射为 stand/walk，可自定
                             actionClass = actionClasses[bestIndex];
-                            Log.d(TAG, String.format(
-                                    "[同步分析] Noise 判定 (label=%d, p=%.3f, 低置信=%b)",
-                                    bestIndex, bestScore, isLowConf));
                         } else {
                             actionClass = actionClasses[bestIndex];
                             Log.d(TAG, "[同步分析] 动作识别概率分布: " + Arrays.toString(probs));
@@ -480,7 +507,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 Log.d(TAG, "[计时] 🔊 音频推理耗时: " + (tAudioInferEnd - tAudioInferStart) + " ms");
 
                                 String[] audioClasses = {"dofast", "doslow", "oral", "Noise"};
-                                float threshold = 0.5f; // 置信度阈值
+                                float threshold = 0.4f; // 置信度阈值
 
                                 int index = result.index;
                                 float confidence = result.confidence;
@@ -510,7 +537,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 // 更新上次音频推理时间
                                 lastAudioInferenceTime = currentSystemTime;
                             } else {
-                                Log.w(TAG, "[音频线程] 未能读取到音频数据");
+                                Log.w(TAG, "[音频线程] [同步分析] 未能读取到音频数据");
                             }
                         } else {
                             Log.w(TAG, "[同步分析] PCM 缓冲启动中，等待解码器填充...");
@@ -539,6 +566,12 @@ public class VideoProcessActivity extends AppCompatActivity {
                 if (shouldStop.get()) {
                     return;
                 }
+                // 检查是否暂停
+                if (isAnalysisPaused.get()) {
+                    Log.d(TAG, "[融合线程] 当前处于暂停状态，跳过本轮融合");
+                    mainHandler.postDelayed(this, 100);
+                    return;
+                }
 
                 // 读取最新的分析结果（原子操作，线程安全）
                 String videoAction = latestVideoAction.get();
@@ -553,20 +586,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                 long videoAge = videoTime > 0 ? currentTime - videoTime : Long.MAX_VALUE;
                 long audioAge = audioTime > 0 ? currentTime - audioTime : Long.MAX_VALUE;
 
-                // 融合逻辑
-                String finalAction = "";
-
-                if (!videoAction.isEmpty() && !audioAction.isEmpty()) {
-                    if (!videoAction.equals(audioAction)) {
-                        Log.d(TAG, String.format("[融合] 音视频结果冲突，使用视频结果 (视频:%dms前, 音频:%dms前)",
-                                videoAge, audioAge));
-                    }
-                    finalAction = videoAction;
-                } else if (!videoAction.isEmpty()) {
-                    finalAction = videoAction;
-                } else if (!audioAction.isEmpty()) {
-                    finalAction = audioAction;
-                }
+                // 7.19 修改：使用平滑融合替代原有的简单融合逻辑
+                String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
 
                 // 去重并发送蓝牙
                 if (!finalAction.isEmpty() && !finalAction.equals(lastFinalAction)) {
@@ -593,6 +614,136 @@ public class VideoProcessActivity extends AppCompatActivity {
         mainHandler.post(fusionRunnable);
     }
 
+    // 7.19 新增：时间窗口平滑融合方法
+    private String smoothedFusion(String videoAction, String audioAction, float videoConf, float audioConf) {
+        synchronized (historyLock) {
+            // 添加当前记录到历史
+            actionHistory.add(new ActionRecord(videoAction, audioAction, videoConf, audioConf));
+
+            // 保持窗口大小
+            while (actionHistory.size() > SMOOTH_WINDOW_SIZE) {
+                actionHistory.poll();
+            }
+
+            // 如果历史记录太少，使用原始逻辑
+            if (actionHistory.size() < 3) {
+                return selectBestAction(videoAction, audioAction, videoConf, audioConf);
+            }
+
+            // 统计各动作的加权得分
+            Map<String, Float> actionScores = new HashMap<>();
+            Map<String, Integer> actionCounts = new HashMap<>();
+
+            // 给最近的记录更高的权重
+            int index = 0;
+            for (ActionRecord record : actionHistory) {
+                float weight = (float)(index + 1) / actionHistory.size(); // 越新权重越高
+
+                // 处理视频动作
+                // 将视频动作映射到音频类别
+                if (!record.videoAction.isEmpty() && !record.videoAction.equals("Background")) {
+                    // 将视频动作映射到音频类别
+                    String mappedVideoAction = mapVideoToAudioAction(record.videoAction);
+                    if (!mappedVideoAction.isEmpty()) {
+                        float score = actionScores.getOrDefault(mappedVideoAction, 0f);
+                        score += record.videoConfidence * weight * 0.8f; // 视频权重稍低
+                        actionScores.put(mappedVideoAction, score);
+
+                        int count = actionCounts.getOrDefault(mappedVideoAction, 0);
+                        actionCounts.put(mappedVideoAction, count + 1);
+                    }
+                }
+
+                // 处理音频动作（如果需要考虑音频）
+                // 处理音频动作
+                if (!record.audioAction.isEmpty() && !record.audioAction.equals("Noise")) {
+                    // 将音频动作转换为统一的key（用于匹配视频映射后的结果）
+                    String audioKey = record.audioAction;
+                    float score = actionScores.getOrDefault(audioKey, 0f);
+                    score += record.audioConfidence * weight * 1.3f; // 音频权重更高
+                    actionScores.put(audioKey, score);
+
+                    int count = actionCounts.getOrDefault(audioKey, 0);
+                    actionCounts.put(audioKey, count + 1);
+                }
+
+                index++;
+            }
+
+            // 选择得分最高的动作
+            String bestAction = "";
+            float bestScore = 0;
+
+            for (Map.Entry<String, Float> entry : actionScores.entrySet()) {
+                String action = entry.getKey();
+                float score = entry.getValue();
+                int count = actionCounts.getOrDefault(action, 0);
+
+                // 需要至少出现2次才考虑（避免偶然噪声）
+                if (count >= 2 && score > bestScore) {
+                    bestScore = score;
+                    bestAction = action;
+                }
+            }
+
+            // 如果没有找到合适的动作，使用最新的高置信度结果
+            if (bestAction.isEmpty()) {
+                ActionRecord latest = actionHistory.getLast();
+                bestAction = selectBestAction(latest.videoAction, latest.audioAction,
+                        latest.videoConfidence, latest.audioConfidence);
+            }
+
+            // 记录平滑结果
+            Log.d(TAG, String.format("[平滑融合] 窗口大小:%d, 选择动作:%s (得分:%.2f)",
+                    actionHistory.size(), bestAction, bestScore));
+
+            return bestAction;
+        }
+    }
+
+    // 7.19新增：简单的动作选择逻辑（用于历史记录不足时）
+    private String selectBestAction(String videoAction, String audioAction, float videoConf, float audioConf) {
+        // 先检查音频（直接返回音频动作）
+        if (!audioAction.isEmpty() && !audioAction.equals("Noise")) {
+            return audioAction;
+        }
+        // 音频无效时使用视频（需要映射）
+        else if (!videoAction.isEmpty() && !videoAction.equals("Background")) {
+            return mapVideoToAudioAction(videoAction);
+        }
+        return "";
+    }
+
+    // 7.19 新增：视频动作到音频动作的映射
+    private String mapVideoToAudioAction(String videoAction) {
+        if (videoAction == null || videoAction.isEmpty()) {
+            return "";
+        }
+
+        switch (videoAction) {
+            // 口交动作 → oral
+            case "Oral-full":          // label 0
+            case "Oral-close up":      // label 1
+                return "oral";
+
+            // 做爱动作 → doslow（根据你的要求，所有做爱动作都映射为doslow）
+            case "Missionary":         // label 2
+            case "Doggy":             // label 3
+            case "Cowgirl":           // label 4
+            case "Standing Rear":      // label 5
+                return "doslow";
+
+            // 杂音 → Noise
+            case "Noise-Stand/Walk":   // label 6
+            case "Noise-Sit":         // label 7
+            case "Background":
+                return "Noise";
+
+            default:
+                return "";
+        }
+    }
+
     /**
      * 处理视频seek完成
      */
@@ -617,6 +768,12 @@ public class VideoProcessActivity extends AppCompatActivity {
 
             synchronized (audioLock) {
                 pcmBuffer.reset();
+            }
+
+            // 7.19新增：清空动作历史记录
+            synchronized (historyLock) {
+                actionHistory.clear();
+                Log.d(TAG, "[平滑融合] 清空历史记录（因为seek操作）");
             }
 
             // 重置提取器, 通知视频帧抽取器：从当前时间开始解码
