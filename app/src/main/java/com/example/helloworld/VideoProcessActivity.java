@@ -59,12 +59,14 @@ public class VideoProcessActivity extends AppCompatActivity {
     private final AtomicReference<String> latestVideoAction = new AtomicReference<>("");
     private final AtomicReference<Float> latestAudioConfidence = new AtomicReference<>(0f);
     private final AtomicReference<Float> latestVideoConfidence = new AtomicReference<>(0f);
+    // 显示蓝牙发送的动作
+    private final AtomicReference<String> latestBluetoothAction = new AtomicReference<>("");
     // 添加时间戳记录
     private final AtomicReference<Long> latestVideoTimestamp = new AtomicReference<>(0L);
     private final AtomicReference<Long> latestAudioTimestamp = new AtomicReference<>(0L);
 
     // 7.19 新增：时间窗口平滑相关变量
-    private static final int SMOOTH_WINDOW_SIZE = 5; // 500ms的平滑窗口（每100ms一次，5次=500ms）
+    private static final int SMOOTH_WINDOW_SIZE = 10; // 融合分析平滑窗口的大小 10（10帧 × 100ms = 1000ms = 1秒）
     private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
     private final Object historyLock = new Object(); // 用于同步访问actionHistory
 
@@ -85,11 +87,19 @@ public class VideoProcessActivity extends AppCompatActivity {
         }
     }
 
+    // 蓝牙发送状态管理器变量部分
+    private static final long BLUETOOTH_MIN_DURATION = 2000; // 蓝牙动作最小持续时间2秒
+    private static final long BLUETOOTH_SEND_INTERVAL = 500; // 蓝牙发送间隔500ms
+    private long lastBluetoothSendTime = 0;
+    private String currentBluetoothState = "";
+    private long currentStateStartTime = 0;
+    private String pendingBluetoothState = "";
+    private long pendingStateStartTime = 0;
+
     // ✅ 音频分析计时
     private long audioStartTime = 0;
     private boolean isAudioCompleted = false;
     private PcmCircularBuffer pcmBuffer;
-    private String lastFinalAction = "";
     private Handler seekHandler = new Handler(Looper.getMainLooper());
     private Runnable pendingSeekRunnable;
     private boolean isFullscreen = false;
@@ -122,7 +132,7 @@ public class VideoProcessActivity extends AppCompatActivity {
 
     private static final int BINARY_WINDOW = 8;
     private final ArrayDeque<float[][]> poseWindow8 = new ArrayDeque<>();
-    private static final float BINARY_TH = 0.29f;
+    private static final float BINARY_TH = 0.30f;
 
     // 动作类别
     private final String[] actionClasses = {
@@ -352,7 +362,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                                     });
                                 });
                             } else {
-                                Log.w(TAG, "[主线程] 未能抽取到视频帧");
+                                Log.w(TAG, "[主线程] [同步分析] 未能抽取到视频帧");
                             }
                         } catch (Exception e) {
                             Log.e(TAG, "[主线程] 抽帧异常：", e);
@@ -429,8 +439,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                     Log.d(TAG, "[计时] [视频线程] 🧠 ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
 
                     if (scores != null) {
-                        //采用置信度阈值法，若最大概率 < 阈值 T（如0.3），则强制判为"杂音"类别,否则按照原有 argmax 判别类别。
-                        float threshold = 0.3f;
+                        //采用置信度阈值法，若最大概率 < 阈值 T（如0.4），则强制判为"杂音"类别,否则按照原有 argmax 判别类别。
+                        float threshold = 0.4f;
                         float[] probs = softmax(scores);
                         int bestIndex = argMax(probs);
                         float bestScore = probs[bestIndex];
@@ -441,13 +451,14 @@ public class VideoProcessActivity extends AppCompatActivity {
                         String actionClass;
                         if (isNoiseLabel || isLowConf) { // 任一条件满足 → 统一当 Noise
                             Log.d(TAG, String.format(
-                                    "[同步分析] 判定为 Noise (label=%d, p=%.3f, 低置信=%b)",
+                                    "[同步分析] 视频分析判定为 Noise (label=%d, p=%.3f, 低置信=%b)",
                                     bestIndex, bestScore, isLowConf));
                             bestIndex = 6; // “默认”映射为 stand/walk，可自定
                             actionClass = actionClasses[bestIndex];
                         } else {
                             actionClass = actionClasses[bestIndex];
-                            Log.d(TAG, "[同步分析] 动作识别概率分布: " + Arrays.toString(probs));
+                            Log.d(TAG, String.format("[同步分析] 视频识别结果: %s (p=%.2f)", actionClass, bestScore));
+                            Log.d(TAG, "[视频线程] 动作识别概率分布: " + Arrays.toString(probs));
                         }
 
                         // 原子更新结果
@@ -589,21 +600,19 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 7.19 修改：使用平滑融合替代原有的简单融合逻辑
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
 
-                // 去重并发送蓝牙
-                if (!finalAction.isEmpty() && !finalAction.equals(lastFinalAction)) {
-                    if (BluetoothHelper.globalHelper != null) {
-                        BluetoothHelper.globalHelper.sendData(finalAction);
-                    }
-                    lastFinalAction = finalAction;
-                    Log.d(TAG, String.format("[融合] 发送蓝牙指令: %s (V:%dms前, A:%dms前)",
+                // 使用稳定的蓝牙发送策略
+                if (!finalAction.isEmpty()) {
+                    updateBluetoothState(finalAction);
+                    Log.d(TAG, String.format("[融合] finalAction: %s (V:%dms前, A:%dms前)",
                             finalAction, videoAge, audioAge));
                 }
 
-                // 更新UI
-                if (!finalAction.isEmpty()) {
-                    String overlayText = String.format("Video: %s (%dms前) | Audio: %s (%dms前) | Final: %s",
-                            videoAction, videoAge, audioAction, audioAge, finalAction);
-                    tvOverlay.setText(overlayText);
+                // 更新UI, 显示蓝牙实际发送的动作
+                String bluetoothAction = latestBluetoothAction.get();
+                if (!bluetoothAction.isEmpty()) {
+                    tvOverlay.setText("蓝牙发送动作: " + bluetoothAction);
+                } else {
+                    tvOverlay.setText("蓝牙发送等待识别...");
                 }
 
                 // 继续下一轮
@@ -679,8 +688,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                 float score = entry.getValue();
                 int count = actionCounts.getOrDefault(action, 0);
 
-                // 需要至少出现2次才考虑（避免偶然噪声）
-                if (count >= 2 && score > bestScore) {
+                // 需要至少出现3次才考虑（避免偶然噪声）
+                if (count >= 3 && score > bestScore) {
                     bestScore = score;
                     bestAction = action;
                 }
@@ -744,6 +753,60 @@ public class VideoProcessActivity extends AppCompatActivity {
         }
     }
 
+
+    // 蓝牙发送状态管理器
+    private void updateBluetoothState(String newAction) {
+        long currentTime = System.currentTimeMillis();
+
+        // 如果是新动作
+        if (!newAction.equals(pendingBluetoothState)) {
+            pendingBluetoothState = newAction;
+            pendingStateStartTime = currentTime;
+            Log.d(TAG, String.format("[蓝牙] 检测到新动作: %s, 等待确认...", newAction));
+        }
+
+        // 检查待确认动作是否已经稳定足够长时间（500ms）
+        if (pendingBluetoothState.equals(newAction) &&
+                (currentTime - pendingStateStartTime) >= 500) {
+
+            // 如果是不同的动作，且当前动作已持续足够时间
+            if (!pendingBluetoothState.equals(currentBluetoothState)) {
+
+                // 检查当前状态是否已经持续了最小时间
+                if (currentBluetoothState.isEmpty() ||
+                        (currentTime - currentStateStartTime) >= BLUETOOTH_MIN_DURATION) {
+
+                    // 控制发送频率
+                    if ((currentTime - lastBluetoothSendTime) >= BLUETOOTH_SEND_INTERVAL) {
+                        // 无论蓝牙是否连接，都更新状态和UI
+                        Log.i(TAG, String.format("[蓝牙] [同步分析] ✅ 发送指令: %s (已稳定%dms)",
+                                pendingBluetoothState, currentTime - pendingStateStartTime));
+
+                        // 更新UI显示的动作（不管蓝牙是否连接）
+                        latestBluetoothAction.set(pendingBluetoothState);
+
+                        // 发送新动作
+                        if (BluetoothHelper.globalHelper != null) {
+                            BluetoothHelper.globalHelper.sendData(pendingBluetoothState);
+                            Log.i(TAG, "[蓝牙] 已通过蓝牙发送指令");
+                        }else {
+                            Log.w(TAG, "[蓝牙] 蓝牙未连接，仅更新UI显示");
+                        }
+
+                        currentBluetoothState = pendingBluetoothState;
+                        currentStateStartTime = currentTime;
+                        lastBluetoothSendTime = currentTime;
+                    }
+                } else {
+                    // 当前动作还未持续足够时间，继续等待
+                    long remainingTime = BLUETOOTH_MIN_DURATION - (currentTime - currentStateStartTime);
+                    Log.d(TAG, String.format("[蓝牙] 当前动作%s需继续保持%dms",
+                            currentBluetoothState, remainingTime));
+                }
+            }
+        }
+    }
+
     /**
      * 处理视频seek完成
      */
@@ -792,7 +855,11 @@ public class VideoProcessActivity extends AppCompatActivity {
                 }
             }
             // 清空蓝牙控制动作缓存
-            lastFinalAction = "";
+            currentBluetoothState = "";
+            pendingBluetoothState = "";
+            latestBluetoothAction.set("");
+            currentStateStartTime = 0;
+            pendingStateStartTime = 0;
         };
 
         seekHandler.postDelayed(pendingSeekRunnable, 500);
