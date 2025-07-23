@@ -681,25 +681,20 @@ public class VideoProcessActivity extends AppCompatActivity {
                 float weight = (float)(index + 1) / actionHistory.size(); // 越新权重越高
 
                 // 处理视频动作
-                // 将视频动作映射到音频类别
                 if (!record.videoAction.isEmpty() && !record.videoAction.equals("Background")) {
-                    // 将视频动作映射到音频类别
-                    // 视频动作现在已经是音频类别，不需要映射
+                    // 包括Noise在内的所有动作都参与评分
                     String videoKey = record.videoAction;
-                    if (!videoKey.equals("Noise")) {  // 排除噪音
-                        float score = actionScores.getOrDefault(videoKey, 0f);
-                        score += record.videoConfidence * weight * 0.8f; // 视频权重稍低
-                        actionScores.put(videoKey, score);
+                    float score = actionScores.getOrDefault(videoKey, 0f);
+                    score += record.videoConfidence * weight * 0.8f; // 视频权重稍低
+                    actionScores.put(videoKey, score);
 
-                        int count = actionCounts.getOrDefault(videoKey, 0);
-                        actionCounts.put(videoKey, count + 1);
-                    }
+                    int count = actionCounts.getOrDefault(videoKey, 0);
+                    actionCounts.put(videoKey, count + 1);
                 }
 
-                // 处理音频动作（如果需要考虑音频）
                 // 处理音频动作
-                if (!record.audioAction.isEmpty() && !record.audioAction.equals("Noise")) {
-                    // 将音频动作转换为统一的key（用于匹配视频映射后的结果）
+                if (!record.audioAction.isEmpty()) {
+                    // 包括Noise在内的所有动作都参与评分
                     String audioKey = record.audioAction;
                     float score = actionScores.getOrDefault(audioKey, 0f);
                     score += record.audioConfidence * weight * 1.3f; // 音频权重更高
@@ -744,14 +739,28 @@ public class VideoProcessActivity extends AppCompatActivity {
     }
 
     // 7.19新增：简单的动作选择逻辑（用于历史记录不足时）
+    // 7.19新增：简单的动作选择逻辑（用于历史记录不足时）
     private String selectBestAction(String videoAction, String audioAction, float videoConf, float audioConf) {
-        // 先检查音频
-        if (!audioAction.isEmpty() && !audioAction.equals("Noise")) {
-            return audioAction;
+        // 使用置信度来决定，而不是排除Noise
+        // 音频优先策略
+        if (!audioAction.isEmpty()) {
+            // 如果音频是有效动作（非Noise）或音频置信度很高，使用音频
+            if (!audioAction.equals("Noise") || audioConf > 0.7f) {
+                return audioAction;
+            }
         }
-        else if (!videoAction.isEmpty() && !videoAction.equals("Background") && !videoAction.equals("Noise")) {
-            return videoAction;
+        // 视频作为备选
+        if (!videoAction.isEmpty() && !videoAction.equals("Background")) {
+            // 如果视频是有效动作（非Noise）或视频置信度很高，使用视频
+            if (!videoAction.equals("Noise") || videoConf > 0.7f) {
+                return videoAction;
+            }
         }
+        // 如果音视频都是Noise，返回Noise（而不是空字符串）
+        if ("Noise".equals(audioAction) || "Noise".equals(videoAction)) {
+            return "Noise";
+        }
+
         return "";
     }
 
