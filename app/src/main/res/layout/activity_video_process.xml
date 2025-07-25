@@ -4,12 +4,20 @@
     android:layout_height="match_parent"
     android:background="#000000">  <!-- ✅ 黑色背景 -->
 
-    <!-- ✅ 修改 VideoView：wrap_content + 居中 -->
-    <VideoView
-        android:id="@+id/videoView"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center" />
+    <!--  新增：VideoView 的专用容器 -->
+    <FrameLayout
+        android:id="@+id/videoContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000">
+
+        <!--  修改：VideoView 改为 match_parent -->
+        <VideoView
+            android:id="@+id/videoView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center" />
+    </FrameLayout>
 
     <!-- 控制状态展示文字（不变） -->
     <LinearLayout

@@ -35,6 +35,10 @@ import com.google.mlkit.vision.pose.PoseLandmark;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.pose.accurate.AccuratePoseDetectorOptions;
 
+import android.widget.FrameLayout;
+import android.view.Gravity;
+import android.content.res.Configuration;
+
 public class VideoProcessActivity extends AppCompatActivity {
 
     private static final String TAG = "VideoProcessActivity";
@@ -53,6 +57,10 @@ public class VideoProcessActivity extends AppCompatActivity {
     // ✅ 音频推理相关变量
     private AudioDecoder audioDecoder;
     private AudioInferenceHelper audioHelper;
+
+    private FrameLayout videoContainer;  // UI新增
+    private int originalWidth = 0;       // UI新增
+    private int originalHeight = 0;      // UI新增
 
     // 使用原子引用来安全地在线程间共享结果
     private final AtomicReference<String> latestAudioAction = new AtomicReference<>("");
@@ -143,6 +151,7 @@ public class VideoProcessActivity extends AppCompatActivity {
 
         // 初始化UI组件
         videoView = findViewById(R.id.videoView);
+        videoContainer = findViewById(R.id.videoContainer);  // 🔴 新增这行
         tvOverlay = findViewById(R.id.tvOverlay);
         tvVideoAction = findViewById(R.id.tvVideoAction);
         tvAudioAction = findViewById(R.id.tvAudioAction);
@@ -191,6 +200,13 @@ public class VideoProcessActivity extends AppCompatActivity {
 
         // 视频准备完成监听
         videoView.setOnPreparedListener(mp -> {
+            // 获取视频原始尺寸
+            originalWidth = mp.getVideoWidth();
+            originalHeight = mp.getVideoHeight();
+            Log.d(TAG, "视频原始尺寸: " + originalWidth + "x" + originalHeight);
+
+            // 设置初始视频缩放
+            adjustVideoSize(false);
             // 设置 seek 完成监听，检测用户拖动视频播放进度
             mp.setOnSeekCompleteListener(seekMp -> handleSeekComplete());
             videoView.start();
@@ -883,7 +899,7 @@ public class VideoProcessActivity extends AppCompatActivity {
 
             // 重置提取器, 通知视频帧抽取器：从当前时间开始解码
             videoFrameExtractor.seekTo(currentMs * 1000);
-            // decoder 负责重新 seek 解码，内部已做提前 4 秒逻辑
+            // decoder 负责重新 seek 解码
             audioDecoder.seekTo(currentMs);
             Log.d(TAG, "🎯 audioDecoder.seekTo() 调用，当前视频播放时间: " + currentMs);
             audioStartTime = currentMs;
@@ -923,17 +939,99 @@ public class VideoProcessActivity extends AppCompatActivity {
         getWindow().getDecorView().setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_FULLSCREEN |
                         View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE |           // 🔴 新增
+                        View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |  // 🔴 新增
+                        View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN        // 🔴 新增
         );
+
+        // 🔴 新增：隐藏状态栏和导航栏
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().hide();
+        }
+
         btnFullscreen.setImageResource(R.drawable.ic_fullscreen_exit);
+
+        // 🔴 新增：延迟调整视频尺寸，确保布局完成
+        videoContainer.postDelayed(() -> adjustVideoSize(true), 100);
     }
 
     private void exitFullscreen() {
         isFullscreen = false;
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+
+        // 显示状态栏
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().show();
+        }
+
         btnFullscreen.setImageResource(R.drawable.ic_fullscreen);
+
+        // 延迟调整视频尺寸，确保布局完成
+        videoContainer.postDelayed(() -> adjustVideoSize(false), 100);
     }
+
+    // 添加调整视频尺寸的方法
+    private void adjustVideoSize(boolean isFullscreen) {
+        if (originalWidth == 0 || originalHeight == 0) return;
+
+        // 获取容器尺寸
+        int containerWidth = videoContainer.getWidth();
+        int containerHeight = videoContainer.getHeight();
+
+        if (containerWidth == 0 || containerHeight == 0) {
+            // 如果容器尺寸还未确定，延迟执行
+            videoContainer.post(() -> adjustVideoSize(isFullscreen));
+            return;
+        }
+
+        float videoAspectRatio = (float) originalWidth / originalHeight;
+        float containerAspectRatio = (float) containerWidth / containerHeight;
+
+        int finalWidth;
+        int finalHeight;
+
+        if (isFullscreen) {
+            // 全屏模式：尽可能填充屏幕
+            if (videoAspectRatio > containerAspectRatio) {
+                // 视频更宽，以宽度为准
+                finalWidth = containerWidth;
+                finalHeight = (int) (containerWidth / videoAspectRatio);
+            } else {
+                // 视频更高，以高度为准
+                finalHeight = containerHeight;
+                finalWidth = (int) (containerHeight * videoAspectRatio);
+            }
+        } else {
+            // 竖屏模式：保持原有逻辑
+            if (videoAspectRatio > containerAspectRatio) {
+                finalWidth = containerWidth;
+                finalHeight = (int) (containerWidth / videoAspectRatio);
+            } else {
+                finalHeight = containerHeight;
+                finalWidth = (int) (containerHeight * videoAspectRatio);
+            }
+        }
+
+        // 更新 VideoView 的布局参数
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) videoView.getLayoutParams();
+        params.width = finalWidth;
+        params.height = finalHeight;
+        params.gravity = Gravity.CENTER;
+        videoView.setLayoutParams(params);
+
+        Log.d(TAG, String.format("调整视频尺寸 - 容器: %dx%d, 视频: %dx%d, 最终: %dx%d",
+                containerWidth, containerHeight, originalWidth, originalHeight, finalWidth, finalHeight));
+    }
+
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+
+        // 屏幕方向改变时重新调整视频尺寸
+        videoContainer.post(() -> adjustVideoSize(isFullscreen));
+    }
+
 
     // 工具方法保持不变
     private float[][][] convertPoseWindowToInput(ArrayDeque<float[][]> window) {
