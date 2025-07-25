@@ -22,13 +22,19 @@ public class AudioDecoder {
     private static final String TAG = "AudioDecoder";
     private Supplier<Integer> videoPositionProvider;
 
+    // 7.24新增：seek后宽限期相关常量
+    private static final long SEEK_GRACE_PERIOD = 2000; // seek后的宽限期2秒
+    private static final long MAX_ADVANCE_NORMAL = 3000; // 正常情况下提前3秒
+    private static final long MAX_ADVANCE_AFTER_SEEK = 6000; // seek后允许提前6秒
+    private volatile long lastSeekTimeInDecoder = 0; // 记录解码器中的seek时间
+
 
     private Context context;
     private Uri videoUri;
     private AudioInferenceHelper audioHelper;
     private volatile boolean isDecoding = false;
 
-    // ✅ 新增：音频分析完成监听器（用于主界面记录音频耗时）
+    // 音频分析完成监听器（用于主界面记录音频耗时）
     private Runnable onCompleteListener = null;
 
     private PcmCircularBuffer pcmBuffer;
@@ -53,6 +59,9 @@ public class AudioDecoder {
             return;
         }
         lastSeekRealTime = now;
+
+        // 7.24新增：记录seek时间，供解码线程使用
+        lastSeekTimeInDecoder = now;
 
         Log.d(TAG, "🔄 AudioDecoder.seekTo() called, new time: " + ms + "ms");
 
@@ -172,13 +181,29 @@ public class AudioDecoder {
                     while (outputIndex >= 0) {
                         long currentPtsMs = bufferInfo.presentationTimeUs / 1000;
 
-                        // ✅ 插入限速逻辑：防止写入太快
+                        // 7.24 改进的限速逻辑,防止写入太快
                         long playbackTime = videoPositionProvider.get();
-                        Log.d(TAG, String.format("🔎 写入 PCM：pts=%d, 当前播放=%d, 提前 %.2f 秒",
-                                currentPtsMs, playbackTime, (currentPtsMs - playbackTime) / 1000.0));
 
-                        if (currentPtsMs > playbackTime + 3000) {
-                            Log.d(TAG, "⏸️ 解码器限速等待，当前播放时间: " + playbackTime + "ms，解码帧时间: " + currentPtsMs + "ms");
+                        // 7.24 计算自上次seek以来的时间
+                        long timeSinceSeek = System.currentTimeMillis() - lastSeekTimeInDecoder;
+
+                        // 7.24 根据是否刚seek过来决定允许的最大提前量
+                        long maxAdvance;
+                        if (timeSinceSeek < SEEK_GRACE_PERIOD && lastSeekTimeInDecoder > 0) {
+                            maxAdvance = MAX_ADVANCE_AFTER_SEEK; // seek后2秒内允许提前6秒
+                            Log.d(TAG, String.format("🚀 Seek宽限期内，允许提前%d秒 (已过%dms)",
+                                    maxAdvance/1000, timeSinceSeek));
+                        } else {
+                            maxAdvance = MAX_ADVANCE_NORMAL; // 正常情况提前3秒
+                        }
+
+                        // 7.24 使用动态的maxAdvance
+                        Log.d(TAG, String.format("🔎 写入 PCM：pts=%d, 当前播放=%d, 提前 %.2f 秒, 限制=%.1f秒",
+                                currentPtsMs, playbackTime, (currentPtsMs - playbackTime) / 1000.0, maxAdvance / 1000.0));
+
+                        if (currentPtsMs > playbackTime + maxAdvance) {
+                            Log.d(TAG, String.format("⏸️ 解码器限速等待，当前播放时间: %dms，解码帧时间: %dms，超出限制%.1f秒",
+                                    playbackTime, currentPtsMs, maxAdvance / 1000.0));
                             try {
                                 Thread.sleep(100);
                             } catch (InterruptedException e) {
@@ -186,7 +211,6 @@ public class AudioDecoder {
                             }
                             continue;
                         }
-
 
                         boolean isEosFrame = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
 

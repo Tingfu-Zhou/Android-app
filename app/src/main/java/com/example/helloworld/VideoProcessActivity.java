@@ -322,7 +322,7 @@ public class VideoProcessActivity extends AppCompatActivity {
 
                 try {
                     int currentMs = videoView.getCurrentPosition();
-                    Log.d(TAG, "[视频线程] 当前播放时间: " + currentMs + "ms");
+                    //Log.d(TAG, "[视频线程] 当前播放时间: " + currentMs + "ms");
 
                     // ✅ 在主线程抽取视频帧，避免 SurfaceTexture 跨线程问题
                     mainHandler.post(() -> {
@@ -433,42 +433,74 @@ public class VideoProcessActivity extends AppCompatActivity {
                     Log.d(TAG, "[计时] [视频线程] 🧠 ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
 
                     if (scores != null) {
-                        //采用置信度阈值法，若最大概率 < 阈值 T（如0.4），则强制判为"杂音"类别,否则按照原有 argmax 判别类别。
-                        float threshold = 0.4f;
                         float[] probs = softmax(scores);
 
                         // 新增：合并同类概率
-                        // oral = label 0 + label 1
-                        float probOral = probs[0] + probs[1];
-                        // doslow = label 2 + label 3 + label 4 + label 5
-                        float probDoslow = probs[2] + probs[3] + probs[4] + probs[5];
-                        // noise = label 6 + label 7
-                        float probNoise = probs[6] + probs[7];
+                        float probOral = probs[0] + probs[1]; // oral = label 0 + label 1
+                        float probDoslow = probs[2] + probs[3] + probs[4] + probs[5]; // doslow = label 2 + label 3 + label 4 + label 5
+                        // 噪音类分开
+                        float probNoiseStand = probs[6];
+                        float probNoiseSit = probs[7];
 
-                        // 创建合并后的概率数组
-                        float[] mergedProbs = new float[]{probOral, probDoslow, probNoise};
-                        String[] mergedClasses = new String[]{"oral", "doslow", "Noise"};
+                        // 计算目标类和噪声类的最大概率
+                        float maxTargetProb = Math.max(probOral, probDoslow);
+                        float maxNoiseProb = Math.max(probNoiseStand, probNoiseSit);
 
-                        // 找到最大概率的类别
-                        int bestIndex = argMax(mergedProbs);
-                        float bestScore = mergedProbs[bestIndex];
-                        String actionClass = mergedClasses[bestIndex];
+                        float NOISE_RATIO_THRESHOLD = 1.5f; // β=1.5，噪声需要比目标类高50%才被认定
+                        // 比例阈值参数,根据目标类的置信度动态调整比例阈值
+                        /*
+                        if (maxTargetProb > 0.7f) {
+                            // 目标类置信度高时，噪声需要更显著才能胜出
+                            NOISE_RATIO_THRESHOLD = 1.8f;
+                        } else if (maxTargetProb > 0.5f) {
+                            NOISE_RATIO_THRESHOLD = 1.5f;
+                        } else {
+                            // 目标类置信度低时，降低比例要求
+                            NOISE_RATIO_THRESHOLD = 1.3f;
+                        }
+                        */
 
-                        // 应用阈值判断
+                        String actionClass;
+                        float bestScore;
+
+                        // 判定逻辑
+                        if (maxNoiseProb > maxTargetProb * NOISE_RATIO_THRESHOLD) {
+                            // 噪声显著高于目标类
+                            if (probNoiseStand > probNoiseSit) {
+                                actionClass = "Noise";
+                                bestScore = probNoiseStand;
+                            } else {
+                                actionClass = "Noise";
+                                bestScore = probNoiseSit;
+                            }
+                            //Log.d(TAG, String.format("噪声显著优于目标类 (噪声:%.3f > 目标:%.3f × %.1f)",
+                                    //maxNoiseProb, maxTargetProb, NOISE_RATIO_THRESHOLD));
+                        } else {
+                            // 在目标类中选择
+                            if (probOral > probDoslow) {
+                                actionClass = "oral";
+                                bestScore = probOral;
+                            } else {
+                                actionClass = "doslow";
+                                bestScore = probDoslow;
+                            }
+                        }
+
+
+                        //采用置信度阈值法，若最大概率 < 阈值 T（如0.2），则强制判为"杂音"类别,否则按照原有 argmax 判别类别。
+                        float threshold = 0.2f;
                         if (bestScore < threshold) {
                             actionClass = "Noise";
                             bestScore = 1.0f; // 低置信度统一视为噪音
                             Log.d(TAG, String.format(
-                                    "[同步分析] 视频分析判定为 Noise (合并后概率=%.3f < 阈值)",
+                                    "[同步分析] 视频分析判定为 Noise (最大概率=%.3f < 阈值)",
                                     bestScore));
                         } else {
                             Log.d(TAG, String.format("[同步分析] 视频识别结果: %s (p=%.2f)",
                                     actionClass, bestScore));
-                            // 可选：输出详细的概率分布
-                            Log.d(TAG, String.format("[视频线程] 合并概率分布: oral=%.3f, doslow=%.3f, noise=%.3f",
-                                    probOral, probDoslow, probNoise));
-                            // 可选：输出原始8类概率分布
-                            Log.d(TAG, "[视频线程] 原始概率分布: " + Arrays.toString(probs));
+                            // 输出详细的概率分布
+                            Log.d(TAG, String.format("[视频线程] 概率分布: oral=%.3f, doslow=%.3f, noise_stand=%.3f, noise_sit=%.3f",
+                                    probOral, probDoslow, probNoiseStand, probNoiseSit));
                         }
 
                         // 原子更新结果
@@ -678,7 +710,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             // 给最近的记录更高的权重
             int index = 0;
             for (ActionRecord record : actionHistory) {
-                float weight = (float)(index + 1) / actionHistory.size(); // 越新权重越高
+                float weight = (float)(index + 1) / actionHistory.size(); // 时间权重，越新权重越高
 
                 // 处理视频动作
                 if (!record.videoAction.isEmpty() && !record.videoAction.equals("Background")) {
@@ -738,8 +770,7 @@ public class VideoProcessActivity extends AppCompatActivity {
         }
     }
 
-    // 7.19新增：简单的动作选择逻辑（用于历史记录不足时）
-    // 7.19新增：简单的动作选择逻辑（用于历史记录不足时）
+    // 简单的动作选择逻辑（用于历史记录不足时）
     private String selectBestAction(String videoAction, String audioAction, float videoConf, float audioConf) {
         // 使用置信度来决定，而不是排除Noise
         // 音频优先策略
