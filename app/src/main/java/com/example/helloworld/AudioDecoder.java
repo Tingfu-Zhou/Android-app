@@ -252,7 +252,7 @@ public class AudioDecoder {
                         if (bufferPos == windowSize) {
                             Log.d(TAG, "缓冲区满，准备写入 PCM。windowSize=" + windowSize + ", sampleRate=" + sampleRate);
 
-                            if (sampleRate != targetSampleRate) {
+                            if (sampleRate != targetSampleRate) { //将任意采样率的音频重采样到 16kHz
                                 float[] originalTime = new float[bufferPos];
                                 for (int i = 0; i < bufferPos; i++) {
                                     originalTime[i] = (float) i / sampleRate;

@@ -425,12 +425,14 @@ public class VideoProcessActivity extends AppCompatActivity {
                 float prob = inferenceHelper.runBinary(binInput);
                 long tStgcnEnd = System.currentTimeMillis();
                 Log.d(TAG, "[计时] [视频线程] 🧠 二分类ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
-                if (prob < BINARY_TH) {
-                    Log.d(TAG, "[视频线程] [同步分析] 二分类判定为Background");
-                    latestVideoAction.set("Background");
-                    latestVideoConfidence.set(prob);
-                    skipMulti = true;
-                }
+                // 🔴🔴🔴 修改：注释掉二分类判断，让skipMulti始终为false
+                //if (prob < BINARY_TH) {
+                    //Log.d(TAG, "[视频线程] [同步分析] 二分类判定为Background");
+                    //latestVideoAction.set("Background");
+                    //latestVideoConfidence.set(prob);
+                    //latestVideoTimestamp.set(System.currentTimeMillis());
+                    //skipMulti = true;
+                //}
             }
 
             // 32帧多分类
