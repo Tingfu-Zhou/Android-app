@@ -420,11 +420,11 @@ public class VideoProcessActivity extends AppCompatActivity {
             if (poseWindow8.size() > BINARY_WINDOW) poseWindow8.poll();
 
             if (poseWindow8.size() == BINARY_WINDOW) {
-                float[][][] binInput = convertPoseWindowToInput(poseWindow8);
-                long tStgcnStart = System.currentTimeMillis();
-                float prob = inferenceHelper.runBinary(binInput);
-                long tStgcnEnd = System.currentTimeMillis();
-                Log.d(TAG, "[计时] [视频线程] 🧠 二分类ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
+                //float[][][] binInput = convertPoseWindowToInput(poseWindow8);
+                //long tStgcnStart = System.currentTimeMillis();
+                //float prob = inferenceHelper.runBinary(binInput);
+                //long tStgcnEnd = System.currentTimeMillis();
+                //Log.d(TAG, "[计时] [视频线程] 🧠 二分类ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
                 // 🔴🔴🔴 修改：注释掉二分类判断，让skipMulti始终为false
                 //if (prob < BINARY_TH) {
                     //Log.d(TAG, "[视频线程] [同步分析] 二分类判定为Background");
