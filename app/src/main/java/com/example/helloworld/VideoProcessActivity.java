@@ -97,7 +97,7 @@ public class VideoProcessActivity extends AppCompatActivity {
 
     // 蓝牙发送状态管理器变量部分
     private static final long BLUETOOTH_MIN_DURATION = 2000; // 蓝牙动作最小持续时间2秒
-    private static final long BLUETOOTH_SEND_INTERVAL = 500; // 蓝牙发送间隔500ms
+    private static final long BLUETOOTH_SEND_INTERVAL = 1600; // 蓝牙发送间隔1600ms
     private long lastBluetoothSendTime = 0;
     private String currentBluetoothState = "";
     private long currentStateStartTime = 0;
@@ -140,7 +140,10 @@ public class VideoProcessActivity extends AppCompatActivity {
 
     private static final int BINARY_WINDOW = 8;
     private final ArrayDeque<float[][]> poseWindow8 = new ArrayDeque<>();
-    private static final float BINARY_TH = 0.30f;
+    //private static final float BINARY_TH = 0.30f;
+    // 主线程融合循环间隔（毫秒）
+    private static final long MAIN_FUSION_INTERVAL = 800;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -645,7 +648,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 检查是否暂停
                 if (isAnalysisPaused.get()) {
                     Log.d(TAG, "[融合线程] 当前处于暂停状态，跳过本轮融合");
-                    mainHandler.postDelayed(this, 100);
+                    mainHandler.postDelayed(this, MAIN_FUSION_INTERVAL);
                     return;
                 }
 
@@ -698,7 +701,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 }
 
                 // 继续下一轮
-                mainHandler.postDelayed(this, 100); // 延迟为100ms
+                mainHandler.postDelayed(this, MAIN_FUSION_INTERVAL); // 延迟为800ms
             }
         };
 
@@ -825,9 +828,9 @@ public class VideoProcessActivity extends AppCompatActivity {
             Log.d(TAG, String.format("[蓝牙] 检测到新动作: %s, 等待确认...", newAction));
         }
 
-        // 检查待确认动作是否已经稳定足够长时间（500ms）
+        // 检查待确认动作是否已经稳定足够长时间（1600ms）
         if (pendingBluetoothState.equals(newAction) &&
-                (currentTime - pendingStateStartTime) >= 500) {
+                (currentTime - pendingStateStartTime) >= 1600) {
 
             // 如果是不同的动作，且当前动作已持续足够时间
             if (!pendingBluetoothState.equals(currentBluetoothState)) {
