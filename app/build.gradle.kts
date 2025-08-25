@@ -50,6 +50,8 @@ dependencies {
     implementation("com.google.mlkit:pose-detection:18.0.0-beta5")
     implementation("com.google.mlkit:pose-detection-accurate:18.0.0-beta5")
     implementation("com.google.android.gms:play-services-tasks:18.0.0")
+    // 如果需要更好的权限管理，可以添加（可选）：
+    implementation("pub.devrel:easypermissions:3.0.0")
     // 单元测试 & Android 测试
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)

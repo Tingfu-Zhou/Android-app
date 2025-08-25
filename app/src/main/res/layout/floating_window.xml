@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:background="#80000000"
+    android:padding="8dp">
+
+    <TextView
+        android:id="@+id/tvVideoAction"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="V: 等待中"
+        android:textSize="12sp"
+        android:textColor="#FFFFFF"
+        android:layout_marginBottom="4dp" />
+
+    <TextView
+        android:id="@+id/tvAudioAction"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="A: 等待中"
+        android:textSize="12sp"
+        android:textColor="#FFFFFF"
+        android:layout_marginBottom="4dp" />
+
+    <TextView
+        android:id="@+id/tvOverlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="融合: 等待中"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:textColor="#FFFF00"
+        android:layout_marginBottom="8dp" />
+
+    <Button
+        android:id="@+id/btn_exit"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:text="退出"
+        android:textColor="#FFFFFF"
+        android:background="#FF0000"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp" />
+
+</LinearLayout>

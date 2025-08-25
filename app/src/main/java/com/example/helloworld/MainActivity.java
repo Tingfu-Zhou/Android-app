@@ -39,6 +39,15 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
+        Button btnOnlineAnalysis = findViewById(R.id.btnOnlineAnalysis);
+        btnOnlineAnalysis.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent(MainActivity.this, OnlineAnalysisActivity.class);
+                startActivity(intent);
+            }
+        });
+
     }
 
     @Override
