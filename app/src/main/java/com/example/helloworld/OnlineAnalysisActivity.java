@@ -52,7 +52,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     // 分析相关
     private InferenceHelper inferenceHelper;
     private AudioInferenceHelper audioHelper;
-    private BluetoothHelper bluetoothHelper;
 
     // 线程控制
     private final AtomicBoolean isAnalysisPaused = new AtomicBoolean(true);
@@ -554,6 +553,12 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     return;
                 }
 
+                // [新增] 检查BLE是否被本地按键暂停
+                if (BLEManager.globalManager != null && BLEManager.globalManager.isPausedByLocal()) {
+                    Log.d(TAG, "[融合线程] BLE被本地按键暂停，跳过蓝牙发送");
+                    // 仍然进行分析但不发送蓝牙命令
+                }
+
                 String videoAction = latestVideoAction.get();
                 String audioAction = latestAudioAction.get();
                 float videoConf = latestVideoConfidence.get();
@@ -581,8 +586,15 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
 
+                // [修改] 检查BLE暂停状态，如果未暂停才发送
                 if (!finalAction.isEmpty()) {
-                    updateBluetoothState(finalAction);
+                    if (BLEManager.globalManager == null || !BLEManager.globalManager.isPausedByLocal()) {
+                        updateBluetoothState(finalAction);
+                        Log.d(TAG, String.format("[融合] finalAction: %s (V:%dms前, A:%dms前)",
+                                finalAction, videoAge, audioAge));
+                    } else {
+                        Log.d(TAG, "[融合] BLE暂停中，跳过动作: " + finalAction);
+                    }
                 }
 
                 // 通过Service更新悬浮窗UI
@@ -711,8 +723,12 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                                 pendingBluetoothState, currentTime - pendingStateStartTime));
                         latestBluetoothAction.set(pendingBluetoothState);
 
-                        if (BluetoothHelper.globalHelper != null) {
-                            BluetoothHelper.globalHelper.sendData(pendingBluetoothState);
+                        // [修改] 通过BLEManager发送动作
+                        if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
+                            BLEManager.globalManager.sendAction(pendingBluetoothState);
+                            Log.i(TAG, "[蓝牙] 已通过BLE发送指令");
+                        } else {
+                            Log.w(TAG, "[蓝牙] BLE未连接，仅更新UI显示");
                         }
 
                         currentBluetoothState = pendingBluetoothState;
@@ -786,11 +802,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         if (audioHelper != null) {
             audioHelper.close();
         }
-
-        if (bluetoothHelper != null) {
-            bluetoothHelper.close();
-        }
-
         super.onDestroy();
     }
 }

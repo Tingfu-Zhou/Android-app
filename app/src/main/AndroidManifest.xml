@@ -2,13 +2,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.example.helloworld">
 
-    <!-- 蓝牙权限 -->
-    <uses-permission android:name="android.permission.BLUETOOTH" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <!-- [修改] 蓝牙权限 - 更新为完整的BLE权限 -->
+    <!-- Android 12 以下（<= API 30）：经典蓝牙权限 + 定位（BLE扫描需要） -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+
+    <!-- Android 12+（>= API 31）：新的BLE权限 -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
+
+    <!-- [新增] 声明设备需要BLE能力 -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
+
     <!-- 前台服务权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
@@ -24,6 +33,12 @@
     <!-- 通知权限（Android 13+） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- NEW: 网络访问，用于拉取版本 JSON -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- NEW: 仅用于判断是否有网络 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
@@ -38,8 +53,6 @@
             android:configChanges="orientation|screenSize"
             android:screenOrientation="portrait" />
 
-        <!-- 蓝牙连接页面 -->
-        <activity android:name=".BluetoothConnectActivity" android:exported="true" />
 
         <!-- 主页面 -->
         <activity android:name=".MainActivity" android:exported="true">

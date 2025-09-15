@@ -48,7 +48,7 @@ public class VideoProcessActivity extends AppCompatActivity {
     private TextView tvAudioAction;
     private VideoFrameExtractor videoFrameExtractor;
     private InferenceHelper inferenceHelper;
-    private BluetoothHelper bluetoothHelper;
+    //private BluetoothHelper bluetoothHelper;
     private Handler playStateHandler;
     private Runnable playStateChecker;
 
@@ -645,6 +645,13 @@ public class VideoProcessActivity extends AppCompatActivity {
                 if (shouldStop.get()) {
                     return;
                 }
+
+                // 检查BLE是否被本地按键暂停
+                if (BLEManager.globalManager != null && BLEManager.globalManager.isPausedByLocal()) {
+                    Log.d(TAG, "[融合线程] BLE被本地按键暂停，跳过蓝牙发送");
+                    // 仍然进行分析但不发送蓝牙命令
+                }
+
                 // 检查是否暂停
                 if (isAnalysisPaused.get()) {
                     Log.d(TAG, "[融合线程] 当前处于暂停状态，跳过本轮融合");
@@ -685,11 +692,15 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 7.19 修改：使用平滑融合替代原有的简单融合逻辑
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
 
-                // 使用稳定的蓝牙发送策略
+                // [修改] 检查BLE暂停状态，如果未暂停才发送
                 if (!finalAction.isEmpty()) {
-                    updateBluetoothState(finalAction);
-                    Log.d(TAG, String.format("[融合] finalAction: %s (V:%dms前, A:%dms前)",
-                            finalAction, videoAge, audioAge));
+                    if (BLEManager.globalManager == null || !BLEManager.globalManager.isPausedByLocal()) {
+                        updateBluetoothState(finalAction);
+                        Log.d(TAG, String.format("[融合] finalAction: %s (V:%dms前, A:%dms前)",
+                                finalAction, videoAge, audioAge));
+                    } else {
+                        Log.d(TAG, "[融合] BLE暂停中，跳过动作: " + finalAction);
+                    }
                 }
 
                 // 更新UI, 显示蓝牙实际发送的动作
@@ -848,12 +859,12 @@ public class VideoProcessActivity extends AppCompatActivity {
                         // 更新UI显示的动作（不管蓝牙是否连接）
                         latestBluetoothAction.set(pendingBluetoothState);
 
-                        // 发送新动作
-                        if (BluetoothHelper.globalHelper != null) {
-                            BluetoothHelper.globalHelper.sendData(pendingBluetoothState);
-                            Log.i(TAG, "[蓝牙] 已通过蓝牙发送指令");
-                        }else {
-                            Log.w(TAG, "[蓝牙] 蓝牙未连接，仅更新UI显示");
+                        // 发送新动作, 通过BLEManager发送动作
+                        if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
+                            BLEManager.globalManager.sendAction(pendingBluetoothState);
+                            Log.i(TAG, "[蓝牙] 已通过BLE发送指令");
+                        } else {
+                            Log.w(TAG, "[蓝牙] BLE未连接，仅更新UI显示");
                         }
 
                         currentBluetoothState = pendingBluetoothState;
@@ -1116,10 +1127,6 @@ public class VideoProcessActivity extends AppCompatActivity {
 
         if (inferenceHelper != null) {
             inferenceHelper.close();
-        }
-
-        if (bluetoothHelper != null) {
-            bluetoothHelper.close();
         }
 
         if (audioDecoder != null) {
