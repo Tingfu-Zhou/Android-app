@@ -157,7 +157,7 @@ public class AudioDecoder {
 
                 outerLoop:
                 while (isDecoding && !(sentEos && outputDone)) {
-                    Log.d(TAG, "🔁 解码循环进行中...");
+                    //Log.d(TAG, "🔁 解码循环进行中...");
 
                     int inputIndex = decoder.dequeueInputBuffer(10000);
                     if (inputIndex >= 0) {
@@ -201,9 +201,11 @@ public class AudioDecoder {
                         Log.d(TAG, String.format("🔎 写入 PCM：pts=%d, 当前播放=%d, 提前 %.2f 秒, 限制=%.1f秒",
                                 currentPtsMs, playbackTime, (currentPtsMs - playbackTime) / 1000.0, maxAdvance / 1000.0));
 
+                        final int availableSamples = pcmBuffer.getBufferedSamples();
                         if (currentPtsMs > playbackTime + maxAdvance) {
                             Log.d(TAG, String.format("⏸️ 解码器限速等待，当前播放时间: %dms，解码帧时间: %dms，超出限制%.1f秒",
                                     playbackTime, currentPtsMs, maxAdvance / 1000.0));
+                            Log.d(TAG, "解码器限速等待, 此时 availableSamples=" + availableSamples);
                             try {
                                 Thread.sleep(100);
                             } catch (InterruptedException e) {

@@ -23,6 +23,9 @@ public class PcmCircularBuffer {
     private long lastWriteStart = -1;
     private long lastWriteEnd = -1;
 
+    // 记录最近一次的 availableSamples
+    private int lastAvailableSamples = 0;
+
     public PcmCircularBuffer(int sampleRate, int maxSeconds) {
         this(sampleRate, maxSeconds, false);
     }
@@ -117,8 +120,11 @@ public class PcmCircularBuffer {
             }
         }
 
+        // 记录本次的 availableSamples 
+        lastAvailableSamples = count;
+
         if (count < sampleCount * 0.9f) {
-            Log.w(TAG, "🚫 readWindowRelaxed: 样本太少，本轮放弃分析");
+            Log.w(TAG, "🚫 readWindowRelaxed: 样本太少，本轮放弃分析。availableSamples=" + lastAvailableSamples + "，需要=" + sampleCount);
             return null;
         }
         if (count < sampleCount) {
@@ -224,6 +230,7 @@ public class PcmCircularBuffer {
         lastWriteStart = -1;
         lastWriteEnd = -1;
         totalSamplesWritten = 0;
+        lastAvailableSamples = 0;
     }
 
     /**

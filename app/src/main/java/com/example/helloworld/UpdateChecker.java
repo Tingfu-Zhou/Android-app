@@ -4,7 +4,6 @@ package com.example.helloworld;
 import android.content.Context;
 import android.os.Build;
 
-import com.google.android.datatransport.backend.cct.BuildConfig;
 
 import org.json.JSONObject;
 
@@ -26,6 +25,24 @@ public final class UpdateChecker {
     // TODO: 替换为你 CDN 上的固定地址（HTTPS）
     public static final String VERSION_URL = "https://cdn.xswy.tech/app/version.json"; // NEW
 
+    // 新增：统一、安全地获取当前应用的 versionCode，避免 BuildConfig 包名不一致问题
+    private static int getAppVersionCode(Context ctx) {
+        try {
+            // API 28+ 使用 longVersionCode
+            android.content.pm.PackageManager pm = ctx.getPackageManager();
+            android.content.pm.PackageInfo pi = pm.getPackageInfo(ctx.getPackageName(), 0);
+            if (Build.VERSION.SDK_INT >= 28) {
+                return (int) pi.getLongVersionCode();
+            } else {
+                return pi.versionCode;
+            }
+        } catch (Exception e) {
+            // 新增：兜底返回一个很大的值，宁可不弹窗也不要误判为“必须更新”
+            return Integer.MAX_VALUE;
+        }
+    }
+
+
     public interface Callback {
         /** info == null 表示无更新或拉取失败 */
         void onResult(UpdateInfo info);
@@ -46,6 +63,11 @@ public final class UpdateChecker {
                 HttpURLConnection conn = (HttpURLConnection) new URL(VERSION_URL).openConnection();
                 conn.setConnectTimeout(5000);  // 超时
                 conn.setReadTimeout(5000);     // 超时
+                // 新增：禁用缓存，防止旧 JSON 误判
+                conn.setUseCaches(false);
+                conn.addRequestProperty("Cache-Control", "no-cache");
+                conn.addRequestProperty("Pragma", "no-cache");
+
                 int http = conn.getResponseCode();
                 if (http != 200) {
                     // 网络失败策略——静默：返回 null
@@ -66,7 +88,8 @@ public final class UpdateChecker {
                 info.notes        = a.optString("notes", "");
                 info.landingUrl   = a.getString("landingUrl");
 
-                int current = BuildConfig.VERSION_CODE;
+                int current = getAppVersionCode(ctx);  // 修改：改为通过 PackageManager 读取
+
                 info.force = current < info.minSupported;
 
                 if (current < info.latestCode) cb.onResult(info);
