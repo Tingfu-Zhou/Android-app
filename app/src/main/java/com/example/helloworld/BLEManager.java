@@ -49,10 +49,10 @@ public class BLEManager {
     private static final int PATTERN_1 = 1; // 模式1：恒定
     private static final int PATTERN_2 = 2; // 模式2：脉冲
     private static final int PATTERN_3 = 3; // 模式3：波形
-    private static final int LEVEL_STOP = 0;
-    private static final int LEVEL_L = 1;    // 低
-    private static final int LEVEL_M = 2;    // 中
-    private static final int LEVEL_H = 3;    // 高
+    private static int LEVEL = 0;
+    //private static final int LEVEL_L = 1;    // 低
+    //private static final int LEVEL_M = 2;    // 中
+    //private static final int LEVEL_H = 3;    // 高
 
     // ====== 全局单例 ======
     public static BLEManager globalManager = null;
@@ -339,9 +339,9 @@ public class BLEManager {
 
     /**
      * 发送动作命令
-     * @param action "oral", "doslow", "dofast", "Noise" 映射到 "001", "002", "003", "004"
+     * @param action "oral", "do", "Noise" 映射到 "000", "001", "002"
      */
-    public void sendAction(String action) {
+    public void sendAction(String action, int finalFreq) {
         if (!isConnected || rxChar == null || gatt == null || pausedByLocal) {
             Log.w(TAG, "无法发送: connected=" + isConnected + ", paused=" + pausedByLocal);
             return;
@@ -350,6 +350,8 @@ public class BLEManager {
         // 将VideoProcessActivity的动作映射到蓝牙协议
         String mappedAction = mapAction(action);
         byte[] frame = buildFrameForAction(mappedAction);
+        // 马达强度
+        LEVEL = finalFreq;
 
         if (frame != null) {
             writeRx(frame);
@@ -362,19 +364,17 @@ public class BLEManager {
      * 将VideoProcessActivity的动作映射到蓝牙测试app的动作
      */
     private String mapAction(String action) {
-        // VideoProcessActivity输出: "oral", "doslow", "dofast", "Noise"
-        // 蓝牙测试app动作: "001", "002", "003", "004"
+        // VideoProcessActivity输出: "oral", "do", "Noise"
+        // 蓝牙测试app动作: "000", "001", "002"
         switch (action) {
             case "oral":
-                return "001";    // oral -> 恒定-低
-            case "doslow":
-                return "002";    // doslow -> 脉冲-中
-            case "dofast":
-                return "003";    // dofast -> 波形-中
+                return "000";    // oral -> 恒定-低
+            case "do":
+                return "001";    // doslow -> 脉冲-中
             case "Noise":
-                return "004";    // Noise -> 停止
+                return "002";    // Noise -> 停止
             default:
-                return "004";    // 默认停止
+                return "002";    // 默认停止
         }
     }
 
@@ -383,13 +383,13 @@ public class BLEManager {
      */
     private byte[] buildFrameForAction(String action) {
         switch (action) {
-            case "001": // 恒定-低，持续2s
-                return buildSetPatternFrame(PATTERN_1, LEVEL_L, 2000, 0);
-            case "002": // 脉冲-中，持续2s
-                return buildSetPatternFrame(PATTERN_2, LEVEL_M, 2000, 0);
-            case "003": // 波形-中，循环
-                return buildSetPatternFrame(PATTERN_3, LEVEL_M, 0, 1);
-            case "004": // 停止
+            case "000": // 恒定-低，持续2s
+                return buildSetPatternFrame(PATTERN_1, LEVEL, 2000, 0);
+            case "001": // 脉冲-中，持续2s
+                return buildSetPatternFrame(PATTERN_2, LEVEL, 2000, 0);
+            //case "003": // 波形-中，循环
+                //return buildSetPatternFrame(PATTERN_3, LEVEL, 0, 1);
+            case "002": // 停止
                 return buildStopAllFrame();
             default:
                 return null;

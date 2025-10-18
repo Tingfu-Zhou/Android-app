@@ -144,6 +144,30 @@ public class VideoProcessActivity extends AppCompatActivity {
     // 主线程融合循环间隔（毫秒）
     private static final long MAIN_FUSION_INTERVAL = 800;
 
+    // 音频节奏器
+    private final AudioRhythmEstimator rhythmEstimator = new AudioRhythmEstimator(16000);
+
+    // 音频节奏,使用原子引用来安全地在线程间共享结果
+    private final java.util.concurrent.atomic.AtomicReference<Float> latestAudioRhythmHz =
+            new java.util.concurrent.atomic.AtomicReference<>(Float.NaN);
+    private final java.util.concurrent.atomic.AtomicReference<Float> latestAudioRhythmConf =
+            new java.util.concurrent.atomic.AtomicReference<>(0f);
+    private final java.util.concurrent.atomic.AtomicLong latestAudioRhythmTsMs =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    private final java.util.concurrent.atomic.AtomicBoolean latestAudioRhythmValid =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    // 视频节律器实例初始化
+    private final VideoRhythmEstimator videoRhythmEstimator = new VideoRhythmEstimator();
+
+    // 视频节奏
+    private final java.util.concurrent.atomic.AtomicReference<Float> latestVideoFreqHz =
+            new java.util.concurrent.atomic.AtomicReference<>(Float.NaN);
+    private final java.util.concurrent.atomic.AtomicReference<Float> latestVideoFreqConf =
+            new java.util.concurrent.atomic.AtomicReference<>(0f);
+    private final java.util.concurrent.atomic.AtomicLong latestVideoFreqTsMs =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -418,6 +442,32 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // keypoints[i][2] 置信度不处理
             }
 
+            // === 将归一化后的关键点推入“视频节律器” ===
+            // 注意：只在“本帧有人体关键点可用”时调用；若你的管线里可能出现 kp==null，就先判空。
+            if (keypoints != null) {
+                // framePtsMs：请用你当前这一帧对应的播放/展示时间戳（你已有的变量）
+                long framePtsMs = System.currentTimeMillis();
+
+                videoRhythmEstimator.onPoseFrame(keypoints, framePtsMs);
+
+                // 拉取最新估计值并存储（先不进主融合）
+                float f = videoRhythmEstimator.getLatestFreqHz();
+                float c = videoRhythmEstimator.getLatestConf();
+                long  t = videoRhythmEstimator.getLatestTsMs();
+                Log.d(TAG, String.format("[频率测试] 视频节奏 - 频率:%.2f Hz, 置信度:%.2f", f, c));
+
+                latestVideoFreqHz.set(f);
+                latestVideoFreqConf.set(c);
+                latestVideoFreqTsMs.set(t);
+            } else {
+                // === Seek/镜头切换时同步重置节律器与缓存 ===
+                videoRhythmEstimator.reset();
+                latestVideoFreqHz.set(Float.NaN);
+                latestVideoFreqConf.set(0f);
+                latestVideoFreqTsMs.set(0);
+            }
+            // === 原有流程继续 ===
+
             // 8帧二分类
             poseWindow8.add(keypoints);
             if (poseWindow8.size() > BINARY_WINDOW) poseWindow8.poll();
@@ -502,7 +552,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 actionClass = "oral";
                                 bestScore = probOral;
                             } else {
-                                actionClass = "doslow";
+                                actionClass = "do";
                                 bestScore = probDoslow;
                             }
                         }
@@ -520,7 +570,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                             Log.d(TAG, String.format("[同步分析] 视频识别结果: %s (p=%.2f)",
                                     actionClass, bestScore));
                             // 输出详细的概率分布
-                            Log.d(TAG, String.format("[视频线程] 概率分布: oral=%.3f, doslow=%.3f, noise_stand=%.3f, noise_sit=%.3f",
+                            Log.d(TAG, String.format("[视频线程] 概率分布: oral=%.3f, do=%.3f, noise_stand=%.3f, noise_sit=%.3f",
                                     probOral, probDoslow, probNoiseStand, probNoiseSit));
                         }
 
@@ -577,6 +627,24 @@ public class VideoProcessActivity extends AppCompatActivity {
                             // 读取音频数据
                             float[] audioSegment = pcmBuffer.readWindowRelaxed(currentMs, 32000);
 
+                            // **************音频频率分析**************
+                            float[] last1s = pcmBuffer.readWindowRelaxed(currentMs,16000); // 1秒 @16 kHz
+                            if (last1s != null && last1s.length > 0) {
+                                rhythmEstimator.push(last1s); // 将~1秒追加到4秒内部缓冲区
+                            }
+                            // 仅在预热时(累积>=4秒)且**每~1秒节拍一次**时估计。
+                            if (rhythmEstimator.isWarm()) {
+                                AudioRhythmEstimator.Result rr = rhythmEstimator.estimate(System.currentTimeMillis());
+                                // 仅存储(根据您的要求，不在此处融合)
+                                Log.d(TAG, String.format("[频率测试] 音频节奏 - 有效:%s, 频率:%.2f Hz, 置信度:%.2f",
+                                        rr.valid, rr.frequencyHz, rr.confidence));
+                                latestAudioRhythmHz.set(rr.frequencyHz);
+                                latestAudioRhythmConf.set(rr.confidence);
+                                latestAudioRhythmTsMs.set(rr.timestampMs);
+                                latestAudioRhythmValid.set(rr.valid);
+                            }
+                            //******************************************
+
                             if (audioSegment != null) {
                                 // 音频推理
                                 // ⏱️ 音频推理计时
@@ -585,14 +653,14 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 long tAudioInferEnd = System.currentTimeMillis();
                                 Log.d(TAG, "[计时] 🔊 音频推理耗时: " + (tAudioInferEnd - tAudioInferStart) + " ms");
 
-                                String[] audioClasses = {"dofast", "doslow", "oral", "Noise"};
+                                String[] audioClasses = {"do", "oral", "Noise"};;
                                 float threshold = 0.4f; // 置信度阈值
 
                                 int index = result.index;
                                 float confidence = result.confidence;
 
                                 if (index >= 0 && index < audioClasses.length) {
-                                    // 如果最大概率小于阈值，则归为"杂音"类（004）
+                                    // 如果最大概率小于阈值，则归为"杂音"类(003)
                                     if (confidence < threshold) {
                                         index = audioClasses.length - 1;
                                         confidence = 1.0f; // 可选：视为"完全属于杂音"
@@ -667,13 +735,43 @@ public class VideoProcessActivity extends AppCompatActivity {
                 long videoTime = latestVideoTimestamp.get();
                 long audioTime = latestAudioTimestamp.get();
 
+                // 音频节奏
+                boolean audioFreqValid = latestAudioRhythmValid.get();
+                float audioFreq = latestAudioRhythmHz.get();
+                float audioFreqConf = latestAudioRhythmConf.get();
+                long audioFreqTs = latestAudioRhythmTsMs.get();
+                // 视频节奏
+                float videoFreq = latestVideoFreqHz.get();
+                float videoFreqConf = latestVideoFreqConf.get();
+                long  videoFreqTs = latestVideoFreqTsMs.get();
+
                 // 计算结果的新鲜度（毫秒）
                 long currentTime = System.currentTimeMillis();
                 long videoAge = videoTime > 0 ? currentTime - videoTime : Long.MAX_VALUE;
                 long audioAge = audioTime > 0 ? currentTime - audioTime : Long.MAX_VALUE;
+                long videoFreqAge = videoFreqTs > 0 ? currentTime - videoFreqTs : Long.MAX_VALUE;
+                long audioFreqAge = audioFreqTs > 0 ? currentTime - audioFreqTs : Long.MAX_VALUE;
 
                 // 过滤超过2秒的过期数据
                 final long MAX_AGE = 2000; // 2秒
+
+                // 如果视频节奏结果过期，清空它
+                if (videoFreqAge > MAX_AGE) {
+                    videoFreq = Float.NaN;
+                    videoFreqConf = 0f;
+                    Log.d(TAG, "[融合] 视频节奏结果过期（" + videoFreqAge + "ms），已忽略");
+                }
+
+                // 如果音频频节奏结果过期，清空它
+                if (audioFreqAge > MAX_AGE || !audioFreqValid) {
+                    audioFreq = Float.NaN;
+                    audioFreqConf = 0f;
+                    if (audioFreqAge > MAX_AGE) {
+                        Log.d(TAG, "[融合] 音频节奏结果过期（" + audioFreqAge + "ms），已忽略");
+                    } else {
+                        Log.d(TAG, "[融合] 音频节奏结果无效（audioFreqValid=false），已忽略");
+                    }
+                }
 
                 // 如果视频结果过期，清空它
                 if (videoAge > MAX_AGE) {
@@ -691,11 +789,13 @@ public class VideoProcessActivity extends AppCompatActivity {
 
                 // 7.19 修改：使用平滑融合替代原有的简单融合逻辑
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
+                // 临时采用音频节律作为最终节律
+                int finalFreq = mapFreqToLevel(audioFreq);
 
                 // [修改] 检查BLE暂停状态，如果未暂停才发送
                 if (!finalAction.isEmpty()) {
                     if (BLEManager.globalManager == null || !BLEManager.globalManager.isPausedByLocal()) {
-                        updateBluetoothState(finalAction);
+                        updateBluetoothState(finalAction,finalFreq);
                         Log.d(TAG, String.format("[融合] finalAction: %s (V:%dms前, A:%dms前)",
                                 finalAction, videoAge, audioAge));
                     } else {
@@ -706,7 +806,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 更新UI, 显示蓝牙实际发送的动作
                 String bluetoothAction = latestBluetoothAction.get();
                 if (!bluetoothAction.isEmpty()) {
-                    tvOverlay.setText("蓝牙发送动作: " + bluetoothAction);
+                    tvOverlay.setText("蓝牙: " + bluetoothAction + "节奏：" + finalFreq);
                 } else {
                     tvOverlay.setText("蓝牙发送等待识别...");
                 }
@@ -718,6 +818,32 @@ public class VideoProcessActivity extends AppCompatActivity {
 
         mainHandler.post(fusionRunnable);
     }
+
+    // === NEW: 频率->10档映射占位表（index 1..10：对应档位1~10；0为停止）
+    private static final float[][] LEVEL_RANGES = new float[][]{
+            null,                // 0占位（停止）
+            {0.05f, 0.80f},      // 档1  占位：0.05~0.80 Hz
+            {0.80f, 1.10f},      // 档2
+            {1.10f, 1.40f},      // 档3
+            {1.40f, 1.80f},      // 档4
+            {1.80f, 2.30f},      // 档5
+            {2.30f, 2.80f},      // 档6
+            {2.80f, 3.40f},      // 档7
+            {3.40f, 4.10f},      // 档8
+            {4.10f, 4.80f},      // 档9
+            {4.80f, 6.00f}       // 档10 占位：上限6Hz
+    };
+
+    // === NEW: 把 Hz 映射为 0..10 档（0为停止）——等工厂给确定值后替换 LEVEL_RANGES 即可
+    private static int mapFreqToLevel(final float hz) {
+        if (Float.isNaN(hz) || hz <= 0f) return 0;
+        for (int lvl = 1; lvl <= 10; lvl++) {
+            float[] r = LEVEL_RANGES[lvl];
+            if (r != null && hz >= r[0] && hz < r[1]) return lvl;
+        }
+        return 10; // 超出则钳到最高档
+    }
+
 
     // 7.19 新增：时间窗口平滑融合方法
     private String smoothedFusion(String videoAction, String audioAction, float videoConf, float audioConf) {
@@ -829,7 +955,7 @@ public class VideoProcessActivity extends AppCompatActivity {
 
 
     // 蓝牙发送状态管理器
-    private void updateBluetoothState(String newAction) {
+    private void updateBluetoothState(String newAction, int finalFreq) {
         long currentTime = System.currentTimeMillis();
 
         // 如果是新动作
@@ -861,7 +987,7 @@ public class VideoProcessActivity extends AppCompatActivity {
 
                         // 发送新动作, 通过BLEManager发送动作
                         if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
-                            BLEManager.globalManager.sendAction(pendingBluetoothState);
+                            BLEManager.globalManager.sendAction(pendingBluetoothState,finalFreq);
                             Log.i(TAG, "[蓝牙] 已通过BLE发送指令");
                         } else {
                             Log.w(TAG, "[蓝牙] BLE未连接，仅更新UI显示");
@@ -934,6 +1060,18 @@ public class VideoProcessActivity extends AppCompatActivity {
             latestBluetoothAction.set("");
             currentStateStartTime = 0;
             pendingStateStartTime = 0;
+
+            //清空音频频率控制
+            rhythmEstimator.reset();
+            latestAudioRhythmHz.set(Float.NaN);
+            latestAudioRhythmConf.set(0f);
+            latestAudioRhythmTsMs.set(0);
+            latestAudioRhythmValid.set(false);
+            //清空视频频率控制
+            videoRhythmEstimator.reset();
+            latestVideoFreqHz.set(Float.NaN);
+            latestVideoFreqConf.set(0f);
+            latestVideoFreqTsMs.set(0);
         };
 
         seekHandler.postDelayed(pendingSeekRunnable, 500);
