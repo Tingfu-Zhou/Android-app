@@ -112,6 +112,20 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private String pendingBluetoothState = "";
     private long pendingStateStartTime = 0;
 
+    // NEW: 频率档位确认与节流相关
+    private int currentLevel = 0;                 // 已生效档位（0..10）
+    private long currentLevelSinceMs = 0;         // 当前档位生效起始时间
+    private Integer pendingLevel = null;          // 待确认档位
+    private long pendingLevelSinceMs = 0;         // 待确认计时
+
+    // NEW: 参数（可调）
+    private static final int LEVEL_STABLE_MS   = 800;   // 新档位需稳定的最短时间
+    private static final int LEVEL_MIN_DUR_MS  = 1500;  // 生效档位的最小驻留
+    private static final int LEVEL_SEND_GAP_MS = 1600;  // 档位更新的发送间隔
+
+    // 最近一次“已发送”档位（用于判断是否需要重发同一动作以更新档位）
+    private int lastSentLevel = 0;                  // NEW: 记录上次发送出去的档位
+
     // 主线程融合循环间隔
     private static final long MAIN_FUSION_INTERVAL = 800;
 
@@ -517,15 +531,15 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     float probNoiseStand = probs[6];
                     float probNoiseSit = probs[7];
 
-                    float maxTargetProb = Math.max(probOral, probDoslow);
-                    float maxNoiseProb = Math.max(probNoiseStand, probNoiseSit);
+                    float TargetProb = probOral + probDoslow;
+                    float NoiseProb = probNoiseStand + probNoiseSit;
 
                     float NOISE_RATIO_THRESHOLD = 1.5f;
 
                     String actionClass;
                     float bestScore;
 
-                    if (maxNoiseProb > maxTargetProb * NOISE_RATIO_THRESHOLD) {
+                    if (NoiseProb > TargetProb * NOISE_RATIO_THRESHOLD) {
                         actionClass = "Noise";
                         bestScore = Math.max(probNoiseStand, probNoiseSit);
                     } else {
@@ -538,7 +552,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                         }
                     }
 
-                    float threshold = 0.2f;
+                    float threshold = 0.0f;
                     if (bestScore < threshold) {
                         actionClass = "Noise";
                         bestScore = 1.0f;
@@ -621,7 +635,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                             //Log.d(TAG, "[计时] 音频推理耗时: " + (tAudioInferEnd - tAudioInferStart) + " ms");
 
                             String[] audioClasses = {"do", "oral", "Noise"};
-                            float threshold = 0.4f;
+                            float threshold = 0.0f;
 
                             int index = result.index;
                             float confidence = result.confidence;
@@ -634,6 +648,12 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                                 }
 
                                 String action = audioClasses[index];
+                                // 这里本质是比例阈值判定，噪声需要比目标类高50%才被认定，如果识别为 Noise 但置信度较低，则判定为 do
+                                if ("Noise".equals(action) && confidence < 0.6f) {
+                                    action = "do";
+                                    confidence = 1.0f - confidence;
+                                    Log.d(TAG, "[同步分析] Noise置信度过低(" + confidence + ")，转换为 do，新置信度=" + confidence);
+                                }
                                 Log.d(TAG, String.format("[同步分析] 音频动作识别结果: %s (p=%.2f)", action, confidence));
 
                                 latestAudioAction.set(action);
@@ -731,6 +751,16 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     audioAction = "";
                     audioConf = 0f;
                     Log.d(TAG, "[融合] 音频结果过期（" + audioAge + "ms），已忽略");
+                }
+
+                // 动作类型归一化："oral" 统一处理为 "do"
+                if ("oral".equals(videoAction)) {
+                    videoAction = "do";
+                    Log.d(TAG, "[融合] 视频动作类型 oral -> do");
+                }
+                if ("oral".equals(audioAction)) {
+                    audioAction = "do";
+                    Log.d(TAG, "[融合] 音频动作类型 oral -> do");
                 }
 
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
@@ -879,30 +909,74 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         return "";
     }
 
-    private void updateBluetoothState(String newAction, int finalFreq) {
+    private void updateBluetoothState(String newAction, int finalFreq /* 0..10 */) {
         long currentTime = System.currentTimeMillis();
 
+        // =====================[ NEW: 档位确认（迟滞 + 短稳 + 最小驻留） ]=====================
+        // 仅在该动作支持“变速”时才处理档位；否则清空待确认
+        boolean supportsLevel = isSexAction(newAction) && currentStateSupportsSpeed();
+        if (supportsLevel) {
+            int latestLevel = finalFreq; // 你已经 map 到 0..10 的整数
+
+            // 迟滞：只有越过上下阈时才认为“有变动”的价值
+            if (latestLevel >= upThreshold(currentLevel) || latestLevel <= downThreshold(currentLevel)) {
+                if (pendingLevel == null || !pendingLevel.equals(latestLevel)) {
+                    pendingLevel = latestLevel;
+                    pendingLevelSinceMs = currentTime;
+                } else {
+                    long dwell = currentTime - pendingLevelSinceMs;
+                    boolean stableOk = (dwell >= LEVEL_STABLE_MS);                      // CHANGED: 仅用短稳
+                    if (stableOk && (currentTime - currentLevelSinceMs >= LEVEL_MIN_DUR_MS)) {
+                        // 切换“已确认生效”的档位
+                        currentLevel = pendingLevel;
+                        currentLevelSinceMs = currentTime;
+                        // 不清空 pendingLevel 也可以，保持即可
+                    }
+                }
+            } else {
+                // 回到“无变化”状态，避免无意义计时
+                pendingLevel = null;
+            }
+        } else {
+            pendingLevel = null;
+            // 可选：若不支持变速，可把 currentLevel 维持在安全档位（例如 0/1）
+        }
+        // ====================[ 档位确认结束 ]====================
+        // 如果是新动作
         if (!newAction.equals(pendingBluetoothState)) {
             pendingBluetoothState = newAction;
             pendingStateStartTime = currentTime;
+            Log.d(TAG, String.format("[蓝牙] 检测到新动作: %s, 等待确认...", newAction));
         }
 
+        // 检查待确认动作是否已经稳定足够长时间（1600ms）
         if (pendingBluetoothState.equals(newAction) &&
                 (currentTime - pendingStateStartTime) >= 1600) {
 
+            // ===== 情况 A：切换到“不同动作” =====
             if (!pendingBluetoothState.equals(currentBluetoothState)) {
+
+                // 检查当前状态是否已经持续了最小时间
                 if (currentBluetoothState.isEmpty() ||
                         (currentTime - currentStateStartTime) >= BLUETOOTH_MIN_DURATION) {
 
+                    // 控制发送频率
                     if ((currentTime - lastBluetoothSendTime) >= BLUETOOTH_SEND_INTERVAL) {
+                        // 无论蓝牙是否连接，都更新状态和UI
                         Log.i(TAG, String.format("[蓝牙] [同步分析] ✅ 发送指令: %s (已稳定%dms)",
                                 pendingBluetoothState, currentTime - pendingStateStartTime));
+
+                        // 更新UI显示的动作（不管蓝牙是否连接）
                         latestBluetoothAction.set(pendingBluetoothState);
 
-                        // [修改] 通过BLEManager发送动作
+                        // CHANGED: 发送时携带“已确认档位”，而非原始 finalFreq
+                        int levelToSend = supportsLevel ? currentLevel : finalFreq; // NEW/CHANGED
+
+                        // 发送新动作（带档位），通过BLEManager发送动作
                         if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
-                            BLEManager.globalManager.sendAction(pendingBluetoothState,finalFreq);
-                            Log.i(TAG, "[蓝牙] 已通过BLE发送指令");
+                            BLEManager.globalManager.sendAction(pendingBluetoothState, levelToSend); // CHANGED
+                            Log.i(TAG, "[蓝牙] 已通过BLE发送指令(动作切换/含档位)");
+                            lastSentLevel = levelToSend; // NEW: 记录本次已下发的档位
                         } else {
                             Log.w(TAG, "[蓝牙] BLE未连接，仅更新UI显示");
                         }
@@ -911,10 +985,54 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                         currentStateStartTime = currentTime;
                         lastBluetoothSendTime = currentTime;
                     }
+                } else {
+                    // 当前动作还未持续足够时间，继续等待
+                    long remainingTime = BLUETOOTH_MIN_DURATION - (currentTime - currentStateStartTime);
+                    Log.d(TAG, String.format("[蓝牙] 当前动作%s需继续保持%dms",
+                            currentBluetoothState, remainingTime));
+                }
+            }
+
+            // ===== 情况 B：动作未变，但档位已确认变化 → 允许“重复发送同一动作以更新档位” =====
+            // 说明：你的协议没有“单独更新速度”的帧，因此我们复用同一动作命令携带新档位，
+            // 同时依然受 BLUETOOTH_SEND_INTERVAL 节流控制。
+            else { // pendingBluetoothState.equals(currentBluetoothState)
+                // 仅当支持变速、档位确实变化、达到发送节流间隔时才重发
+                boolean levelChanged = supportsLevel && (currentLevel != lastSentLevel);
+                boolean gapOk = (currentTime - lastBluetoothSendTime) >= BLUETOOTH_SEND_INTERVAL;
+
+                if (levelChanged && gapOk) {
+                    int levelToSend = currentLevel;
+                    Log.i(TAG, String.format("[蓝牙] 同动作更新档位：%s -> level=%d", currentBluetoothState, levelToSend));
+
+                    if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
+                        BLEManager.globalManager.sendAction(currentBluetoothState, levelToSend);
+                        Log.i(TAG, "[蓝牙] 已通过BLE发送指令(同动作/更新档位)");
+                        lastSentLevel = levelToSend;
+                        lastBluetoothSendTime = currentTime;
+                    } else {
+                        Log.w(TAG, "[蓝牙] BLE未连接，无法更新档位（同动作）");
+                    }
                 }
             }
         }
     }
+
+
+    // （可选）门控：当前动作是否支持“变速”（你若已有类似函数，可直接替换）
+    // 根据你的动作命名规则自行实现判断逻辑
+    private boolean currentStateSupportsSpeed() {                              // NEW
+        return currentBluetoothState.startsWith("do");
+    }
+
+    // （可选）门控：newAction 是否属于“做爱大类”（你若已有类似函数，可直接替换）
+    private boolean isSexAction(String action) {                               // NEW
+        return action != null && action.startsWith("do");
+    }
+
+    // NEW: 迟滞门限辅助
+    private int upThreshold(int cur)   { return Math.min(10, cur + 1); }
+    private int downThreshold(int cur) { return Math.max(0,  cur - 1); }
 
     private void pauseAnalysis() {
         isAnalysisPaused.set(true);

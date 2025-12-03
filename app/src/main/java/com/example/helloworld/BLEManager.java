@@ -384,9 +384,9 @@ public class BLEManager {
     private byte[] buildFrameForAction(String action) {
         switch (action) {
             case "000": // 恒定-低，持续2s
-                return buildSetPatternFrame(PATTERN_1, LEVEL, 2000, 0);
+                return buildSetPatternFrame(PATTERN_3, LEVEL, 0, 1);
             case "001": // 脉冲-中，持续2s
-                return buildSetPatternFrame(PATTERN_2, LEVEL, 2000, 0);
+                return buildSetPatternFrame(PATTERN_3, LEVEL, 0, 1);
             //case "003": // 波形-中，循环
                 //return buildSetPatternFrame(PATTERN_3, LEVEL, 0, 1);
             case "002": // 停止
@@ -551,7 +551,7 @@ public class BLEManager {
 
             // 处理ACK
             if (cmd == (0x80 + CMD_SET_PATTERN) || cmd == (0x80 + CMD_STOP_ALL) ||
-                    cmd == (0x80 + CMD_QUERY_STATE) || cmd == (0x80 + CMD_RESUME_APP)) {
+                    cmd == (0x80 + CMD_RESUME_APP)) {
 
                 if (payload.length >= 2) {
                     int ackSeq = payload[0] & 0xFF;

@@ -25,7 +25,7 @@ public class AudioDecoder {
     // 7.24新增：seek后宽限期相关常量
     private static final long SEEK_GRACE_PERIOD = 2000; // seek后的宽限期2秒
     private static final long MAX_ADVANCE_NORMAL = 3000; // 正常情况下提前3秒
-    private static final long MAX_ADVANCE_AFTER_SEEK = 6000; // seek后允许提前6秒
+    private static final long MAX_ADVANCE_AFTER_SEEK = 3000; // seek后允许提前3秒
     private volatile long lastSeekTimeInDecoder = 0; // 记录解码器中的seek时间
 
 
@@ -66,7 +66,7 @@ public class AudioDecoder {
         Log.d(TAG, "🔄 AudioDecoder.seekTo() called, new time: " + ms + "ms");
 
         stop();
-        this.seekToPositionMs = Math.max(ms - 4000, 0);//提前4秒
+        this.seekToPositionMs = ms;  // 直接seek到当前位置，让限速机制自然控制提前量。
         startDecoding();
         Log.d(TAG, "🚀 seekTo() -> startDecoding(), seekToPositionMs = " + seekToPositionMs);
 
