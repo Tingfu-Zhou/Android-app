@@ -157,6 +157,10 @@ public class VideoProcessActivity extends AppCompatActivity {
     //private static final float BINARY_TH = 0.30f;
     // 主线程融合循环间隔（毫秒）
     private static final long MAIN_FUSION_INTERVAL = 800;
+    //视频线程间隔
+    private static final long VIDEO_LOOP_INTERVAL_MS = 100;
+    //音频线程间隔
+    private static final long AUDIO_LOOP_TICK_MS = 1000;
 
     // 音频节奏器
     private final AudioRhythmEstimator rhythmEstimator = new AudioRhythmEstimator(16000);
@@ -420,9 +424,14 @@ public class VideoProcessActivity extends AppCompatActivity {
 
                 long elapsed = System.currentTimeMillis() - t0;
                 Log.d(TAG, "[视频线程] 本轮调度耗时: " + elapsed + "ms");
+                /** 因为视频链路是跨线程 + 异步的, 抽帧真正执行在主线程, 抽到帧后再 videoHandler.post(...) 回视频线程。
+                 * MLKit 姿态检测是异步，主要耗时发生在 MLKit 的内部线程与回调阶段。
+                 * ST-GCN++ 推理是在回调/后续处理里触发 (回调线程)
+                 * 视频线程这轮 run() 只是“发起请求”，几乎不做重计算**/
 
                 // 继续下一轮
-                videoHandler.postDelayed(this, 100);
+                long nextDelay = Math.max(0, VIDEO_LOOP_INTERVAL_MS - elapsed);
+                videoHandler.postDelayed(this, nextDelay);
             }
         };
 
@@ -487,19 +496,21 @@ public class VideoProcessActivity extends AppCompatActivity {
             if (poseWindow8.size() > BINARY_WINDOW) poseWindow8.poll();
 
             if (poseWindow8.size() == BINARY_WINDOW) {
-                //float[][][] binInput = convertPoseWindowToInput(poseWindow8);
-                //long tStgcnStart = System.currentTimeMillis();
-                //float prob = inferenceHelper.runBinary(binInput);
-                //long tStgcnEnd = System.currentTimeMillis();
-                //Log.d(TAG, "[计时] [视频线程] 🧠 二分类ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
-                // 🔴🔴🔴 修改：注释掉二分类判断，让skipMulti始终为false
-                //if (prob < BINARY_TH) {
-                    //Log.d(TAG, "[视频线程] [同步分析] 二分类判定为Background");
-                    //latestVideoAction.set("Background");
-                    //latestVideoConfidence.set(prob);
-                    //latestVideoTimestamp.set(System.currentTimeMillis());
-                    //skipMulti = true;
-                //}
+                /*
+                float[][][] binInput = convertPoseWindowToInput(poseWindow8);
+                long tStgcnStart = System.currentTimeMillis();
+                float prob = inferenceHelper.runBinary(binInput);
+                long tStgcnEnd = System.currentTimeMillis();
+                Log.d(TAG, "[计时] [视频线程] 🧠 二分类ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
+                // 修改：注释掉二分类判断，让skipMulti始终为false
+                if (prob < BINARY_TH) {
+                    Log.d(TAG, "[视频线程] [同步分析] 二分类判定为Background");
+                    latestVideoAction.set("Background");
+                    latestVideoConfidence.set(prob);
+                    latestVideoTimestamp.set(System.currentTimeMillis());
+                    skipMulti = true;
+                }
+                 */
             }
 
             // 32帧多分类
@@ -628,9 +639,10 @@ public class VideoProcessActivity extends AppCompatActivity {
                 }
 
                 if (isAnalysisPaused.get()) {
-                    audioHandler.postDelayed(this, 100);
+                    audioHandler.postDelayed(this, 1000);
                     return;
                 }
+                long t0 = System.currentTimeMillis();
 
                 long currentMs = videoView.getCurrentPosition();
                 long currentSystemTime = System.currentTimeMillis();
@@ -716,8 +728,12 @@ public class VideoProcessActivity extends AppCompatActivity {
                     Log.d(TAG, "[音频] 距上次推理时间不足1秒，跳过本次音频推理");
                 }
 
+                // 计算本轮耗时并做动态延迟
+                long elapsed = System.currentTimeMillis() - t0;
+                Log.d(TAG, "[音频线程] 本轮调度耗时: " + elapsed + "ms");
+                long nextDelay = Math.max(0, AUDIO_LOOP_TICK_MS - elapsed);
                 // 继续下一轮
-                audioHandler.postDelayed(this, 100);
+                audioHandler.postDelayed(this, nextDelay);
             }
         };
 
@@ -747,6 +763,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                     mainHandler.postDelayed(this, MAIN_FUSION_INTERVAL);
                     return;
                 }
+                long t0 = System.currentTimeMillis();
 
                 // 读取最新的分析结果（原子操作，线程安全）
                 String videoAction = latestVideoAction.get();
@@ -843,7 +860,10 @@ public class VideoProcessActivity extends AppCompatActivity {
                 }
 
                 // 继续下一轮
-                mainHandler.postDelayed(this, MAIN_FUSION_INTERVAL); // 延迟为800ms
+                long elapsed = System.currentTimeMillis() - t0;
+                Log.d(TAG, "[融合线程] 本轮调度耗时: " + elapsed + "ms");
+                long nextDelay = Math.max(0, MAIN_FUSION_INTERVAL - elapsed);
+                mainHandler.postDelayed(this, nextDelay);
             }
         };
 

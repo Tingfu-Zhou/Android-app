@@ -128,6 +128,10 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
     // 主线程融合循环间隔
     private static final long MAIN_FUSION_INTERVAL = 800;
+    //视频线程间隔
+    private static final long VIDEO_LOOP_INTERVAL_MS = 100;
+    //音频线程间隔
+    private static final long AUDIO_LOOP_TICK_MS = 1000;
 
     //音频节奏
     private final AudioRhythmEstimator rhythmEstimator = new AudioRhythmEstimator(16000);
@@ -455,8 +459,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     Log.e(TAG, "[视频线程] 异常：", e);
                 }
 
-                // 继续下一轮
-                videoHandler.postDelayed(this, 100);
+                long elapsed = System.currentTimeMillis() - t0;
+                long nextDelay = Math.max(0, VIDEO_LOOP_INTERVAL_MS - elapsed);
+                videoHandler.postDelayed(this, nextDelay);
             }
         };
 
@@ -601,6 +606,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     audioHandler.postDelayed(this, 100);
                     return;
                 }
+                long t0 = System.currentTimeMillis();
 
                 long currentSystemTime = System.currentTimeMillis();
 
@@ -672,7 +678,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     }
                 }
 
-                audioHandler.postDelayed(this, 100);
+                long elapsed = System.currentTimeMillis() - t0;
+                long nextDelay = Math.max(0, AUDIO_LOOP_TICK_MS - elapsed);
+                audioHandler.postDelayed(this, nextDelay);
             }
         };
 
@@ -691,6 +699,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     mainHandler.postDelayed(this, MAIN_FUSION_INTERVAL);
                     return;
                 }
+                long t0 = System.currentTimeMillis();
 
                 // [新增] 检查BLE是否被本地按键暂停
                 if (BLEManager.globalManager != null && BLEManager.globalManager.isPausedByLocal()) {
@@ -791,7 +800,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     OnlineAnalysisService.getInstance().updateFloatingFusionResult(displayText);
                 }
 
-                mainHandler.postDelayed(this, MAIN_FUSION_INTERVAL);
+                long elapsed = System.currentTimeMillis() - t0;
+                long nextDelay = Math.max(0, MAIN_FUSION_INTERVAL - elapsed);
+                mainHandler.postDelayed(this, nextDelay);
             }
         };
 
