@@ -113,7 +113,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private long pendingStateStartTime = 0;
 
     // NEW: 频率档位确认与节流相关
-    private int currentLevel = 0;                 // 已生效档位（0..10）
+    private int currentLevel = 1;                 // 已生效档位（0..10）
     private long currentLevelSinceMs = 0;         // 当前档位生效起始时间
     private Integer pendingLevel = null;          // 待确认档位
     private long pendingLevelSinceMs = 0;         // 待确认计时
@@ -121,7 +121,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     // NEW: 参数（可调）
     private static final int LEVEL_STABLE_MS   = 800;   // 新档位需稳定的最短时间
     private static final int LEVEL_MIN_DUR_MS  = 1500;  // 生效档位的最小驻留
-    private static final int LEVEL_SEND_GAP_MS = 1600;  // 档位更新的发送间隔
 
     // 最近一次“已发送”档位（用于判断是否需要重发同一动作以更新档位）
     private int lastSentLevel = 0;                  // NEW: 记录上次发送出去的档位
@@ -774,7 +773,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
                 // 临时采用音频节律作为最终节律
-                int finalFreq = mapFreqToLevel(audioFreq);
+                // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
+                int finalFreq = computeFinalFreq(audioFreq, audioFreqConf, videoFreq, videoFreqConf);
 
                 // [修改] 检查BLE暂停状态，如果未暂停才发送
                 if (!finalAction.isEmpty()) {
@@ -812,16 +812,16 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     // === NEW: 频率->10档映射占位表（index 1..10：对应档位1~10；0为停止）
     private static final float[][] LEVEL_RANGES = new float[][]{
             null,                // 0占位（停止）
-            {0.05f, 0.80f},      // 档1  占位：0.05~0.80 Hz
-            {0.80f, 1.10f},      // 档2
-            {1.10f, 1.40f},      // 档3
-            {1.40f, 1.80f},      // 档4
-            {1.80f, 2.30f},      // 档5
-            {2.30f, 2.80f},      // 档6
-            {2.80f, 3.40f},      // 档7
-            {3.40f, 4.10f},      // 档8
-            {4.10f, 4.80f},      // 档9
-            {4.80f, 6.00f}       // 档10 占位：上限6Hz
+            {0.05f, 0.80f},      // 档1：极慢、轻微节律
+            {0.80f, 1.10f},      // 档2：~1 Hz 左右
+            {1.10f, 1.40f},      // 档3：略快于 1 Hz
+            {1.40f, 1.80f},      // 档4：接近 1.5 Hz
+            {1.80f, 2.20f},      // 档5：中速起点
+            {2.20f, 2.60f},      // 档6：中速偏快
+            {2.60f, 3.00f},      // 档7：明显较快
+            {3.00f, 3.30f},      // 档8：快速
+            {3.30f, 3.60f},      // 档9：很快
+            {3.60f, 4.00f}       // 档10：最高音频节奏（上限 4 Hz）
     };
 
     // === NEW: 把 Hz 映射为 0..10 档（0为停止）——等工厂给确定值后替换 LEVEL_RANGES 即可
@@ -832,6 +832,59 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             if (r != null && hz >= r[0] && hz < r[1]) return lvl;
         }
         return 10; // 超出则钳到最高档
+    }
+
+    /**
+     * 12.11 计算最终节律档位（0..10）。
+     *
+     * <p>当前策略：仅使用音频节律映射为档位，并做“置信度阈值 + 方向性门控（涨档更严格，降档更宽松）”。
+     * 预留 videoFreq/videoFreqConf 参数，便于未来扩展为音视频融合节律。</p>
+     */
+    private int computeFinalFreq(float audioFreq, float audioFreqConf, float videoFreq, float videoFreqConf) {
+        // 临时采用音频节律作为最终节律
+        int finalFreq = mapFreqToLevel(audioFreq);
+        int videoFre = mapFreqToLevel(videoFreq);
+        Log.d(TAG, "[视频节律] 得到视频节律: " + videoFreq + " 置信度: " + videoFreqConf + " 档位: " + videoFre);
+        Log.d(TAG, "[音频节律] 得到音频节律: " + audioFreq + " 置信度: " + audioFreqConf + " 档位: " + finalFreq);
+
+        // === 12.12: 方向性置信度门控（涨档更严格，降档更宽松） ===
+        {
+            float conf = audioFreqConf;      // 当前这帧的置信度
+
+            // 三个可调参数
+            final float CONF_IGNORE = 0.12f;  // 极低置信度：整体忽略本次节律
+            final float CONF_UP     = 0.35f;  // 涨档所需置信度（更严格）
+            final float CONF_DOWN   = 0.20f;  // 降档所需置信度（相对宽松）
+
+            int curLevel       = currentLevel;  // 当前已生效档位（0..10）
+            int candidateLevel = finalFreq;     // 本次根据 audioFreq 映射出来的档位
+
+            // 1) 极低置信度：直接清空本次节律，维持 currentLevel
+            if (Float.isNaN(audioFreq) || conf < CONF_IGNORE) {
+                Log.d(TAG, String.format(
+                        "[音频节律] conf=%.2f < CONF_IGNORE=%.2f，本次节律整体忽略，freq=NaN，沿用 currentLevel=%d",
+                        conf, CONF_IGNORE, curLevel));
+                finalFreq = curLevel;  // 不给 updateBluetoothState 提供变档机会
+            } else {
+                // 2) 根据档位变动方向应用不同门槛
+                if (candidateLevel > curLevel && conf < CONF_UP) {
+                    // 尝试“涨档”但置信度不足 → 不允许涨档
+                    Log.d(TAG, String.format(
+                            "[音频节律] 尝试涨档 %d→%d 但 conf=%.2f < CONF_UP=%.2f，本次不生效，沿用 currentLevel=%d",
+                            curLevel, candidateLevel, conf, CONF_UP, curLevel));
+                    finalFreq = curLevel;
+                } else if (candidateLevel < curLevel && conf < CONF_DOWN) {
+                    // 尝试“降档”但置信度也太低 → 不允许降档（可视需要放宽）
+                    Log.d(TAG, String.format(
+                            "[音频节律] 尝试降档 %d→%d 但 conf=%.2f < CONF_DOWN=%.2f，本次不生效，沿用 currentLevel=%d",
+                            curLevel, candidateLevel, conf, CONF_DOWN, curLevel));
+                    finalFreq = curLevel;
+                }
+                // candidateLevel == curLevel 时无需处理
+            }
+        }
+
+        return finalFreq;
     }
 
     private String smoothedFusion(String videoAction, String audioAction, float videoConf, float audioConf) {

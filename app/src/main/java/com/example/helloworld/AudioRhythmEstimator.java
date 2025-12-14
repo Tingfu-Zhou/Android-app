@@ -45,7 +45,7 @@ public final class AudioRhythmEstimator {
     // 包络参数
     private final int envFs = 100;                 // 包络采样率(每秒的bin数)
     private final int envHop;                      // sr / envFs = 16000/100 = 160 采样/bin
-    private final int minLagBins = 17;             // ≈ 100/6 Hz ≈ 17
+    private final int minLagBins = 25;             // ≈ 100/4 Hz = 25
     private final int maxLagBins = 200;            // ≈ 100/0.5 Hz = 200
     private final int maSmooth = 5;                // 移动平均长度(~50毫秒)
 
@@ -128,6 +128,9 @@ public final class AudioRhythmEstimator {
         // 4) 移动平均平滑(~50毫秒)
         if (maSmooth > 1) env = movingAverage(env, maSmooth);
 
+        // [12.9 ADD] 在标准化之前，拷贝一份“原始包络”用于弱信号检测
+        float[] envRaw = env.clone();
+
         // 5) 标准化包络: 减去均值，除以标准差(避免直流偏置)
         standardizeInPlace(env);
 
@@ -143,17 +146,67 @@ public final class AudioRhythmEstimator {
         }
         if (bestLag < 0) return Result.invalid(nowMs);
 
+
+        // [12.10 ADD] 次谐波纠错：
+        // 如果当前估计的频率偏高（例如 >3.5 Hz），
+        // 则在 2×bestLag 附近再寻找一个“更慢一倍”的候选峰，
+        // 若该候选峰足够强，则将其视为真正的基础节奏。
+        {
+            float baseFreq = (float) envFs / bestLag; // 先用原 bestLag 算一个频率
+            if (baseFreq > 3.5f) {
+                // 只对节奏>3.5Hz 的情况尝试纠错，避免误伤本来就很慢的节奏
+                int searchRadius = 2;   // 在 2×bestLag ±2 个 bin 内搜索
+                int candidateLag = -1;
+                float candidateR = -Float.MAX_VALUE;
+
+                // 2 倍周期（频率减半）附近
+                int cand2 = bestLag * 2;
+                if (cand2 <= maxLagBins) {
+                    int start = Math.max(minLagBins, cand2 - searchRadius);
+                    int end   = Math.min(maxLagBins, cand2 + searchRadius);
+                    for (int k = start; k <= end && k < env.length - 2; k++) {
+                        float r = autocorrAtLag(env, k);
+                        if (r > candidateR) {
+                            candidateR = r;
+                            candidateLag = k;
+                        }
+                    }
+                }
+
+                // 如有需要，可以在这里继续扩展到 3×bestLag 的次谐波搜索（暂不启用）
+                // int cand3 = bestLag * 3;
+                // ...
+
+                if (candidateLag > 0) {
+                    float mainNorm = bestR / r0;
+                    float subNorm  = candidateR / r0;
+
+                    // 要求：次谐波峰不能比当前主峰弱太多，且自身也不能太弱
+                    // 阈值可根据实际测试调节：
+                    //  - subNorm >= 0.8 * mainNorm   表示“强度接近”
+                    //  - subNorm >= 0.25f            表示“至少有一定周期性”
+                    if (subNorm >= 0.6f * mainNorm && subNorm >= 0.20f) {
+                        // 采用更慢的“基础节奏”
+                        bestLag = candidateLag;
+                        bestR   = candidateR;
+                    }
+                }
+            }
+        }
+
         // 7) 将延迟(100 Hz的bin数) -> Hz
         float freq = (float) envFs / bestLag; // Hz
 
         // 8) 从归一化峰值高度和基本合理性检查计算置信度
         float peakNorm = bestR / r0;                     // [0..1] 准周期信号通常 < 0.7
-        float conf = scoreConfidence(peakNorm, env, bestLag);
 
-        // 9) 将频率限制在[0.5, 6] Hz以减少异常值
-        if (freq < 0.5f || freq > 6f) {
+        // [12. 9 MOD] 给 scoreConfidence 额外传入 envRaw
+        float conf = scoreConfidence(peakNorm, env, envRaw, bestLag);
+
+        // 9) 将频率限制在[0.5, 4] Hz以减少异常值
+        if (freq < 0.5f || freq > 4f) {
             // 如果超出范围，视为低置信度，但仍返回限制后的频率
-            freq = clamp(freq, 0.5f, 6f);
+            freq = clamp(freq, 0.5f, 4f);
             conf *= 0.5f;
         }
         return Result.of(freq, conf, nowMs);
@@ -197,23 +250,51 @@ public final class AudioRhythmEstimator {
     }
 
     /** 置信度曲线: 基于归一化峰值的线性斜坡，带有轻微惩罚。 */
-    private static float scoreConfidence(float peakNorm, float[] env, int bestLag) {
+    // [12. 9 MOD] 新增 envRaw 参数：标准化前的包络
+    private static float scoreConfidence(float peakNorm, float[] envStd, float[] envRaw, int bestLag) {
         // 基于归一化峰值高度的基础值
         float c = (peakNorm - 0.15f) / 0.55f; // 0.15->0, 0.70->1.0 (可调)
         c = clamp(c, 0f, 1f);
-        // 如果包络能量太低(弱信号)则惩罚
-        double energy = 0.0; for (float v : env) energy += v * (double) v;
-        double avg = energy / env.length;
-        if (avg < 0.2) c *= 0.8f;
-        // 可选: 检查bestLag周围的局部一致性(峰值尖锐度)
+
+        // [12.9 ADD] 使用未标准化的 envRaw 做“弱信号 / 动态范围”惩罚
+        if (envRaw != null && envRaw.length > 0) {
+            double energy = 0.0;
+            float maxVal = Float.NEGATIVE_INFINITY;
+            float minVal = Float.POSITIVE_INFINITY;
+
+            for (float v : envRaw) {
+                energy += (double) v * (double) v;
+                if (v > maxVal) maxVal = v;
+                if (v < minVal) minVal = v;
+            }
+
+            double avgEnergy = energy / envRaw.length;
+            float dynamicRange = maxVal - minVal;
+
+            // 能量过低（音频包络整体幅度太小，几乎听不到明显节奏） → 降低置信度（阈值可根据测试再微调）
+            if (avgEnergy < 1e-4) {          // 建议调参范围：1e-4 ~ 1e-3
+                c *= 0.8f;
+            }
+
+            // 动态范围过小（几乎没有起伏）→ 再次降低置信度
+            if (dynamicRange < 1e-3f) {      // 建议调参范围：1e-3 ~ 1e-2
+                c *= 0.8f;
+            }
+        }
+
+        // 可选: 检查 bestLag 周围的局部一致性(峰值尖锐度)，检测自相关主峰是否“尖锐而清晰”，如果主峰不够尖锐（= 周围也很高 = 宽峰），就降低置信度。
         int k = bestLag;
-        float side = 0f;
-        if (k - 2 >= 0 && k + 2 < env.length) {
-            side = 0.25f * (autocorrAtLag(env, k - 2) + autocorrAtLag(env, k + 2) +
-                    autocorrAtLag(env, k - 1) + autocorrAtLag(env, k + 1));
-            float sharp = peakNorm - side / Math.max(1e-6f, autocorrAtLag(env, 0));
+        if (k - 2 >= 0 && k + 2 < envStd.length) {
+            float side = 0f;
+            side = 0.25f * (
+                    autocorrAtLag(envStd, k - 2) + autocorrAtLag(envStd, k + 2) +
+                            autocorrAtLag(envStd, k - 1) + autocorrAtLag(envStd, k + 1)
+            );
+            float sharp = peakNorm - side / Math.max(1e-6f, autocorrAtLag(envStd, 0));
             if (sharp < 0.05f) c *= 0.8f; // 宽峰 -> 稍低的置信度
         }
+
         return clamp(c, 0f, 1f);
     }
+
 }
