@@ -2,7 +2,7 @@ package com.example.helloworld;
 
 // =============================================================
 // 文件: AudioRhythmEstimator.java
-// 用途: 4秒滑动窗口音频节奏估计器 (0.5-6 Hz)
+// 用途: 4秒滑动窗口音频节奏估计器 (0.5-4 Hz)
 //      设计用于插入到您现有的音频线程中。
 //      每个音频线程节拍推送约1秒的16 kHz PCM数据。
 //      当内部缓冲区达到4秒时，估计器
@@ -11,7 +11,7 @@ package com.example.helloworld;
 // 为什么先简单实现:
 //   - 使用宽带短时能量包络(下采样到100 Hz)
 //     以避免繁重的DSP依赖。
-//   - 在延迟范围[17..200]个bin内进行自相关(≈6-0.5 Hz，包络采样率100 Hz)。
+//   - 在延迟范围[25..200]个bin内进行自相关(≈4-0.5 Hz，包络采样率100 Hz)。
 //   - 置信度来自归一化自相关峰值和能量合理性检查。
 //
 // 下一步迭代(保留TODO标记):
@@ -20,6 +20,8 @@ package com.example.helloworld;
 //   - 用1极点低通滤波器@10 Hz替换移动平均平滑处理包络。
 // =============================================================
 
+
+import android.util.Log;
 
 import java.util.Arrays;
 
@@ -37,6 +39,8 @@ public final class AudioRhythmEstimator {
         public static Result of(float f, float c, long ts) { return new Result(true, f, c, ts); }
     }
 
+    private static final String TAG = "AudioRhythmEstimator";
+
     // ======== 配置 ========
     private final int sr;                 // 采样率(预期16000)
     private final int secondsWindow = 4;  // 4秒节奏窗口
@@ -45,8 +49,8 @@ public final class AudioRhythmEstimator {
     // 包络参数
     private final int envFs = 100;                 // 包络采样率(每秒的bin数)
     private final int envHop;                      // sr / envFs = 16000/100 = 160 采样/bin
-    private final int minLagBins = 25;             // ≈ 100/4 Hz = 25
-    private final int maxLagBins = 200;            // ≈ 100/0.5 Hz = 200
+    private final int minLagBins = 54;             // ≈ 100/1.85Hz
+    private final int maxLagBins = 106;            // ≈ 100/0.95Hz
     private final int maSmooth = 5;                // 移动平均长度(~50毫秒)
 
     // ======== 状态(4秒滑动窗口) ========
@@ -148,13 +152,13 @@ public final class AudioRhythmEstimator {
 
 
         // [12.10 ADD] 次谐波纠错：
-        // 如果当前估计的频率偏高（例如 >3.5 Hz），
+        // 如果当前估计的频率偏高（例如 >2.0 Hz），
         // 则在 2×bestLag 附近再寻找一个“更慢一倍”的候选峰，
         // 若该候选峰足够强，则将其视为真正的基础节奏。
         {
             float baseFreq = (float) envFs / bestLag; // 先用原 bestLag 算一个频率
-            if (baseFreq > 3.5f) {
-                // 只对节奏>3.5Hz 的情况尝试纠错，避免误伤本来就很慢的节奏
+            if (baseFreq > 2.0f) {
+                // 只对节奏>2.0Hz 的情况尝试纠错，避免误伤本来就很慢的节奏
                 int searchRadius = 2;   // 在 2×bestLag ±2 个 bin 内搜索
                 int candidateLag = -1;
                 float candidateR = -Float.MAX_VALUE;
@@ -202,11 +206,12 @@ public final class AudioRhythmEstimator {
 
         // [12. 9 MOD] 给 scoreConfidence 额外传入 envRaw
         float conf = scoreConfidence(peakNorm, env, envRaw, bestLag);
+        //Log.d(TAG, "[音频节律] bestR:" + bestR +" r0: " + r0 + " peakNorm 值为：" + peakNorm);
 
-        // 9) 将频率限制在[0.5, 4] Hz以减少异常值
-        if (freq < 0.5f || freq > 4f) {
+        // 9) 将频率限制在[0.95, 1.85] Hz以减少异常值
+        if (freq < 0.95f || freq > 1.85f) {
             // 如果超出范围，视为低置信度，但仍返回限制后的频率
-            freq = clamp(freq, 0.5f, 4f);
+            freq = clamp(freq, 0.95f, 1.85f);
             conf *= 0.5f;
         }
         return Result.of(freq, conf, nowMs);
@@ -240,9 +245,11 @@ public final class AudioRhythmEstimator {
     }
 
     private static float autocorrAtLag(float[] x, int lag) {
-        int n = x.length - lag; if (n <= 1) return 0f;
-        double acc = 0.0; for (int i = 0; i < n; i++) acc += x[i] * (double) x[i + lag];
-        return (float) acc;
+        int n = x.length - lag;
+        if (n <= 1) return 0f;
+        double acc = 0.0;
+        for (int i = 0; i < n; i++) acc += x[i] * (double) x[i + lag];
+        return (float) (acc / n); // 关键：按有效长度归一化
     }
 
     private static float clamp(float v, float lo, float hi) {
@@ -252,8 +259,9 @@ public final class AudioRhythmEstimator {
     /** 置信度曲线: 基于归一化峰值的线性斜坡，带有轻微惩罚。 */
     // [12. 9 MOD] 新增 envRaw 参数：标准化前的包络
     private static float scoreConfidence(float peakNorm, float[] envStd, float[] envRaw, int bestLag) {
+        Log.d(TAG, "[音频节律] peakNorm 值为：" + peakNorm);
         // 基于归一化峰值高度的基础值
-        float c = (peakNorm - 0.15f) / 0.55f; // 0.15->0, 0.70->1.0 (可调)
+        float c = (peakNorm - 0.06f) / 0.35f; // 0.15->0, 0.70->1.0 (可调)
         c = clamp(c, 0f, 1f);
 
         // [12.9 ADD] 使用未标准化的 envRaw 做“弱信号 / 动态范围”惩罚
@@ -274,15 +282,18 @@ public final class AudioRhythmEstimator {
             // 能量过低（音频包络整体幅度太小，几乎听不到明显节奏） → 降低置信度（阈值可根据测试再微调）
             if (avgEnergy < 1e-4) {          // 建议调参范围：1e-4 ~ 1e-3
                 c *= 0.8f;
+                Log.d(TAG, "[音频节律] [置信度惩罚] 触发弱能量惩罚 ");
             }
 
             // 动态范围过小（几乎没有起伏）→ 再次降低置信度
             if (dynamicRange < 1e-3f) {      // 建议调参范围：1e-3 ~ 1e-2
                 c *= 0.8f;
+                Log.d(TAG, "[音频节律] [置信度惩罚] 触发动态范围过小惩罚 ");
             }
         }
 
         // 可选: 检查 bestLag 周围的局部一致性(峰值尖锐度)，检测自相关主峰是否“尖锐而清晰”，如果主峰不够尖锐（= 周围也很高 = 宽峰），就降低置信度。
+        /* 因为该惩罚被频繁触发（无论是什么档位），因此暂时先不使用
         int k = bestLag;
         if (k - 2 >= 0 && k + 2 < envStd.length) {
             float side = 0f;
@@ -292,7 +303,9 @@ public final class AudioRhythmEstimator {
             );
             float sharp = peakNorm - side / Math.max(1e-6f, autocorrAtLag(envStd, 0));
             if (sharp < 0.05f) c *= 0.8f; // 宽峰 -> 稍低的置信度
+            // Log.d(TAG, "[音频节律] [置信度惩罚] 触发主峰尖锐度过低惩罚 ");
         }
+        */
 
         return clamp(c, 0f, 1f);
     }
