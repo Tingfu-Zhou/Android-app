@@ -1165,6 +1165,11 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         latestBluetoothAction.set("");
         currentStateStartTime = 0;
         pendingStateStartTime = 0;
+        // 重置档位确认状态
+        currentLevel = 1;
+        currentLevelSinceMs = 0;
+        pendingLevel = null;
+        pendingLevelSinceMs = 0;
 
         //清空音频频率控制
         rhythmEstimator.reset();
