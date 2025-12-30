@@ -384,9 +384,9 @@ public class BLEManager {
     private byte[] buildFrameForAction(String action) {
         switch (action) {
             case "000": // 恒定-低，持续2s
-                return buildSetPatternFrame(PATTERN_3, LEVEL, 0, 1);
+                return buildSetPatternFrame(PATTERN_1, LEVEL, 0, 1);
             case "001": // 脉冲-中，持续2s
-                return buildSetPatternFrame(PATTERN_3, LEVEL, 0, 1);
+                return buildSetPatternFrame(PATTERN_1, LEVEL, 0, 1);
             //case "003": // 波形-中，循环
                 //return buildSetPatternFrame(PATTERN_3, LEVEL, 0, 1);
             case "002": // 停止

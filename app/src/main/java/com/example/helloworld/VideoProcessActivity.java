@@ -111,8 +111,8 @@ public class VideoProcessActivity extends AppCompatActivity {
     private long pendingLevelSinceMs = 0;         // 待确认计时
 
     // NEW: 参数（可调）
-    private static final int LEVEL_STABLE_MS   = 800;   // 新档位需稳定的最短时间
-    private static final int LEVEL_MIN_DUR_MS  = 1500;  // 生效档位的最小驻留
+    private static final int LEVEL_STABLE_MS   = 0;   // 新档位需稳定的最短时间
+    private static final int LEVEL_MIN_DUR_MS  = 0;  // 生效档位的最小驻留
 
     // 最近一次“已发送”档位（用于判断是否需要重发同一动作以更新档位）
     private int lastSentLevel = 0;                  // NEW: 记录上次发送出去的档位
@@ -899,9 +899,11 @@ public class VideoProcessActivity extends AppCompatActivity {
         if (Float.isNaN(hz) || hz <= 0f) return 0;
         for (int lvl = 1; lvl <= 10; lvl++) {
             float[] r = LEVEL_RANGES[lvl];
-            if (r != null && hz >= r[0] && hz < r[1]) return lvl;
+            if (r != null && hz >= r[0] && hz < r[1]) {
+                return Math.min(lvl, 9);
+            }
         }
-        return 10; // 超出则钳到最高档
+        return 9; // 超出则钳到最高档
     }
 
     /**
@@ -988,7 +990,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                     // 包括Noise在内的所有动作都参与评分
                     String videoKey = record.videoAction;
                     float score = actionScores.getOrDefault(videoKey, 0f);
-                    score += record.videoConfidence * weight * 0.8f; // 视频权重稍低
+                    score += record.videoConfidence * weight * 0.7f; // 视频权重稍低
                     actionScores.put(videoKey, score);
 
                     int count = actionCounts.getOrDefault(videoKey, 0);
@@ -1084,8 +1086,9 @@ public class VideoProcessActivity extends AppCompatActivity {
                     pendingLevelSinceMs = currentTime;
                 } else {
                     long dwell = currentTime - pendingLevelSinceMs;
-                    boolean stableOk = (dwell >= LEVEL_STABLE_MS);                      // 短稳
-                    if (stableOk && (currentTime - currentLevelSinceMs >= LEVEL_MIN_DUR_MS)) { //短稳和最小驻留
+                    boolean stableOk = (dwell >= LEVEL_STABLE_MS);                      // 短稳，设为 0
+                    // 因为蓝牙发送管理器中，发送时已经有蓝牙持续时间了，因此在蓝牙发送管理器中，档位的持续时间重复了，这里将其设为0
+                    if (stableOk && (currentTime - currentLevelSinceMs >= LEVEL_MIN_DUR_MS)) { //短稳和最小驻留，两者都为0，不会其过滤作用
                         // 切换“已确认生效”的档位
                         currentLevel = pendingLevel;
                         currentLevelSinceMs = currentTime;
@@ -1136,6 +1139,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                             BLEManager.globalManager.sendAction(pendingBluetoothState, levelToSend); // CHANGED
                             Log.i(TAG, "[蓝牙] [同步分析] ✅ 已通过BLE发送指令(动作切换/含档位)");
                             lastSentLevel = levelToSend; // NEW: 记录本次已下发的档位
+                            Log.d(TAG,"[音频节律] ✅ 发送节律："+ levelToSend);
                         } else {
                             Log.w(TAG, "[蓝牙] BLE未连接，仅更新UI显示");
                         }
@@ -1169,6 +1173,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                         Log.i(TAG, "[蓝牙] [同步分析] ✅ 已通过BLE发送指令(同动作/更新档位)");
                         lastSentLevel = levelToSend;
                         lastBluetoothSendTime = currentTime;
+                        Log.d(TAG,"[音频节律] ✅ 发送节律："+ levelToSend);
                     } else {
                         Log.w(TAG, "[蓝牙] BLE未连接，无法更新档位（同动作）");
                     }

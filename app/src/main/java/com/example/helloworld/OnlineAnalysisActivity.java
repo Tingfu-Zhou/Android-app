@@ -119,8 +119,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private long pendingLevelSinceMs = 0;         // 待确认计时
 
     // NEW: 参数（可调）
-    private static final int LEVEL_STABLE_MS   = 800;   // 新档位需稳定的最短时间
-    private static final int LEVEL_MIN_DUR_MS  = 1500;  // 生效档位的最小驻留
+    private static final int LEVEL_STABLE_MS   = 0;   // 新档位需稳定的最短时间
+    private static final int LEVEL_MIN_DUR_MS  = 0;  // 生效档位的最小驻留
 
     // 最近一次“已发送”档位（用于判断是否需要重发同一动作以更新档位）
     private int lastSentLevel = 0;                  // NEW: 记录上次发送出去的档位
@@ -833,14 +833,16 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             {1.75f, 1.85f}       // 档10 ≈ 320 RPM (1.78 Hz)
     };
 
-    // === NEW: 把 Hz 映射为 0..10 档（0为停止）——等工厂给确定值后替换 LEVEL_RANGES 即可
+    // === NEW: 把 Hz 映射为 0...9 档（0为停止）——等工厂给确定值后替换 LEVEL_RANGES 即可
     private static int mapFreqToLevel(final float hz) {
         if (Float.isNaN(hz) || hz <= 0f) return 0;
         for (int lvl = 1; lvl <= 10; lvl++) {
             float[] r = LEVEL_RANGES[lvl];
-            if (r != null && hz >= r[0] && hz < r[1]) return lvl;
+            if (r != null && hz >= r[0] && hz < r[1]) {
+                return Math.min(lvl, 9);
+            }
         }
-        return 10; // 超出则钳到最高档
+        return 9; // 超出则钳到最高档
     }
 
     /**
@@ -918,7 +920,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 if (!record.videoAction.isEmpty() && !record.videoAction.equals("Background")) {
                     String videoKey = record.videoAction;
                     float score = actionScores.getOrDefault(videoKey, 0f);
-                    score += record.videoConfidence * weight * 0.8f;
+                    score += record.videoConfidence * weight * 0.7f;
                     actionScores.put(videoKey, score);
 
                     int count = actionCounts.getOrDefault(videoKey, 0);
