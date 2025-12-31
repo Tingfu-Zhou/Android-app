@@ -161,6 +161,7 @@ public class VideoProcessActivity extends AppCompatActivity {
     //音频线程间隔
     private static final long AUDIO_LOOP_TICK_MS = 1000;
 
+    /*
     // 音频节奏器
     private final AudioRhythmEstimator rhythmEstimator = new AudioRhythmEstimator(16000);
 
@@ -173,6 +174,21 @@ public class VideoProcessActivity extends AppCompatActivity {
             new java.util.concurrent.atomic.AtomicLong(0L);
     private final java.util.concurrent.atomic.AtomicBoolean latestAudioRhythmValid =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    */
+    // [12.30] Loudness 档位估计器（替代原 AudioRhythmEstimator）
+    private final AudioLoudnessLevelEstimator loudnessEstimator = new AudioLoudnessLevelEstimator(16000);
+
+    // [12.30] 音频“响度档位”结果（线程安全共享）
+    private final java.util.concurrent.atomic.AtomicInteger latestAudioLoudLevel =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+    private final java.util.concurrent.atomic.AtomicReference<Float> latestAudioLoudConf =
+            new java.util.concurrent.atomic.AtomicReference<>(0f);
+    private final java.util.concurrent.atomic.AtomicLong latestAudioLoudTsMs =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    private final java.util.concurrent.atomic.AtomicBoolean latestAudioLoudValid =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
 
     // 视频节律器实例初始化
     private final VideoRhythmEstimator videoRhythmEstimator = new VideoRhythmEstimator();
@@ -653,6 +669,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                             // 读取音频数据
                             float[] audioSegment = pcmBuffer.readWindowRelaxed(currentMs, 32000);
 
+                            /*
                             // **************音频频率分析**************
                             float[] last1s = pcmBuffer.readWindowRelaxed(currentMs,16000); // 1秒 @16 kHz
                             if (last1s != null && last1s.length > 0) {
@@ -670,6 +687,23 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 latestAudioRhythmValid.set(rr.valid);
                             }
                             //******************************************
+                            */
+
+                            // **************[12.30] 音频 Loudness → 档位分析（替代频率估计）**************
+                            float[] last1s = pcmBuffer.readWindowRelaxed(currentMs, 8000); // 0.5秒, 16 kHz/s
+                            if (last1s != null && last1s.length > 0) {
+                                loudnessEstimator.push(last1s);
+                                AudioLoudnessLevelEstimator.Result lr = loudnessEstimator.estimate(System.currentTimeMillis());
+
+                                Log.d(TAG, String.format("[响度档位] valid:%s, level:%d, conf:%.2f, db:%.1f",
+                                        lr.valid, lr.level, lr.confidence, lr.db));
+
+                                latestAudioLoudLevel.set(lr.level);
+                                latestAudioLoudConf.set(lr.confidence);
+                                latestAudioLoudTsMs.set(lr.timestampMs);
+                                latestAudioLoudValid.set(lr.valid);
+                            }
+                            //********************************************************************
 
                             if (audioSegment != null) {
                                 // 音频推理
@@ -773,10 +807,17 @@ public class VideoProcessActivity extends AppCompatActivity {
                 long audioTime = latestAudioTimestamp.get();
 
                 // 音频节奏
+                boolean audioFreqValid = latestAudioLoudValid.get();
+                float audioFreq = (float) latestAudioLoudLevel.get();    // [MOD] 用 level 伪装成“freq输入”
+                float audioFreqConf = latestAudioLoudConf.get();
+                long audioFreqTs = latestAudioLoudTsMs.get();
+                /*
                 boolean audioFreqValid = latestAudioRhythmValid.get();
                 float audioFreq = latestAudioRhythmHz.get();
                 float audioFreqConf = latestAudioRhythmConf.get();
                 long audioFreqTs = latestAudioRhythmTsMs.get();
+                */
+
                 // 视频节奏
                 float videoFreq = latestVideoFreqHz.get();
                 float videoFreqConf = latestVideoFreqConf.get();
@@ -914,19 +955,22 @@ public class VideoProcessActivity extends AppCompatActivity {
      */
     private int computeFinalFreq(float audioFreq, float audioFreqConf, float videoFreq, float videoFreqConf) {
         // 临时采用音频节律作为最终节律
-        int finalFreq = mapFreqToLevel(audioFreq);
+        // int finalFreq = mapFreqToLevel(audioFreq);
+        int finalFreq = clampLevelFromLoudness(audioFreq); // [MOD] audioFreq 实际是 level(float)
+        Log.d(TAG, "[音频响度] 得到音频档位: " + audioFreq + " 置信度: " + audioFreqConf + " 档位: " + finalFreq);
+
         int videoFre = mapFreqToLevel(videoFreq);
         Log.d(TAG, "[视频节律] 得到视频节律: " + videoFreq + " 置信度: " + videoFreqConf + " 档位: " + videoFre);
-        Log.d(TAG, "[音频节律] 得到音频节律: " + audioFreq + " 置信度: " + audioFreqConf + " 档位: " + finalFreq);
+        // Log.d(TAG, "[音频节律] 得到音频节律: " + audioFreq + " 置信度: " + audioFreqConf + " 档位: " + finalFreq);
 
         // === 12.12: 方向性置信度门控（涨档更严格，降档更宽松） ===
         {
             float conf = audioFreqConf;      // 当前这帧的置信度
 
             // 三个可调参数
-            final float CONF_IGNORE = 0.12f;  // 极低置信度：整体忽略本次节律
-            final float CONF_UP     = 0.35f;  // 涨档所需置信度（更严格）
-            final float CONF_DOWN   = 0.20f;  // 降档所需置信度（相对宽松）
+            final float CONF_IGNORE = 0.10f;  // 极低置信度：整体忽略本次节律
+            final float CONF_UP     = 0.10f;  // 涨档所需置信度
+            final float CONF_DOWN   = 0.10f;  // 降档所需置信度
 
             int curLevel       = currentLevel;  // 当前已生效档位（0..10）
             int candidateLevel = finalFreq;     // 本次根据 audioFreq 映射出来的档位
@@ -957,6 +1001,15 @@ public class VideoProcessActivity extends AppCompatActivity {
         }
 
         return finalFreq;
+    }
+
+    // [ADD] audioFreq 实际承载的是 loudness level（float），这里做 0..9 钳制
+    private static int clampLevelFromLoudness(final float levelLike) {
+        if (Float.isNaN(levelLike)) return 0;
+        int lv = Math.round(levelLike);
+        if (lv < 0) lv = 0;
+        if (lv > 9) lv = 9;
+        return lv;
     }
 
 
@@ -1265,11 +1318,21 @@ public class VideoProcessActivity extends AppCompatActivity {
 
 
             //清空音频频率控制
+            /*
             rhythmEstimator.reset();
             latestAudioRhythmHz.set(Float.NaN);
             latestAudioRhythmConf.set(0f);
             latestAudioRhythmTsMs.set(0);
             latestAudioRhythmValid.set(false);
+            */
+            // [12.30] reset loudness estimator
+            loudnessEstimator.reset();
+            // [12.30] 清空 loudness 输出
+            latestAudioLoudLevel.set(0);
+            latestAudioLoudConf.set(0f);
+            latestAudioLoudTsMs.set(0L);
+            latestAudioLoudValid.set(false);
+
             //清空视频频率控制
             videoRhythmEstimator.reset();
             latestVideoFreqHz.set(Float.NaN);
