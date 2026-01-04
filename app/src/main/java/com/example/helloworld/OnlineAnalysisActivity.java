@@ -560,7 +560,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
                     if (NoiseProb > TargetProb * NOISE_RATIO_THRESHOLD) {
                         actionClass = "Noise";
-                        bestScore = Math.max(probNoiseStand, probNoiseSit);
+                        bestScore = 0.0f;
                     } else {
                         if (probOral > probDoslow) {
                             actionClass = "oral";
@@ -1074,9 +1074,15 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             Log.d(TAG, String.format("[蓝牙] 检测到新动作: %s, 等待确认...", newAction));
         }
 
-        // 检查待确认动作是否已经稳定足够长时间（1600ms）
+        // [ADD] 动作稳定确认时间：默认 1600ms；若从目标动作(do/oral)切到 Noise，则延长到 2400ms
+        int actionStableMs = 1600;
+        if (isSexAction(currentBluetoothState) && "Noise".equals(newAction)) {
+            actionStableMs = 2400;
+        }
+
+        // [MOD] 使用动态稳定确认时间
         if (pendingBluetoothState.equals(newAction) &&
-                (currentTime - pendingStateStartTime) >= 1600) {
+                (currentTime - pendingStateStartTime) >= actionStableMs) {
 
             // ===== 情况 A：切换到“不同动作” =====
             if (!pendingBluetoothState.equals(currentBluetoothState)) {
