@@ -155,6 +155,9 @@ public class AudioDecoder {
                 float[] audioBuffer = new float[windowSize];
                 int bufferPos = 0;
 
+                // ✅ [FIX] 新增：记录当前窗口的起始时间戳
+                long windowStartPtsMs = -1;
+
                 outerLoop:
                 while (isDecoding && !(sentEos && outputDone)) {
                     //Log.d(TAG, "🔁 解码循环进行中...");
@@ -238,6 +241,12 @@ public class AudioDecoder {
 
                         lastPtsMs = currentPtsMs;
 
+                        // ✅ [FIX] 记录窗口起始时间戳（在第一个有效帧时记录）
+                        if (windowStartPtsMs < 0) {
+                            windowStartPtsMs = currentPtsMs;
+                            Log.d(TAG, "📌 [FIX] 记录窗口起始时间戳: " + windowStartPtsMs + "ms");
+                        }
+
                         // ✅ 正常处理帧数据
                         ByteBuffer outputBuffer = outputBuffers[outputIndex];
                         outputBuffer.position(bufferInfo.offset);
@@ -253,6 +262,9 @@ public class AudioDecoder {
 
                         if (bufferPos == windowSize) {
                             Log.d(TAG, "缓冲区满，准备写入 PCM。windowSize=" + windowSize + ", sampleRate=" + sampleRate);
+
+                            // ✅ [FIX] 使用窗口起始时间戳，而不是当前帧的时间戳
+                            long segmentStartTimestamp = windowStartPtsMs;
 
                             if (sampleRate != targetSampleRate) { //将任意采样率的音频重采样到 16kHz
                                 float[] originalTime = new float[bufferPos];
@@ -280,22 +292,20 @@ public class AudioDecoder {
                                         resampledBuffer[i] = audioBuffer[j];
                                     }
                                 }
-                                long segmentStartTimestamp = bufferInfo.presentationTimeUs / 1000L;
 
-                                Log.d(TAG, "📤 bufferInfo pts(ms): " + (bufferInfo.presentationTimeUs / 1000L));
+                                Log.d(TAG, "📤 [FIX] 使用窗口起始时间戳(ms): " + segmentStartTimestamp);
                                 Log.d(TAG, "📤 [write] bufferPos = " + bufferPos + ", sampleRate = " + sampleRate + ", segmentStartTimestamp = " + segmentStartTimestamp);
                                 pcmBuffer.write(resampledBuffer, segmentStartTimestamp, targetSampleRate);
                                 Log.d(TAG, "✅ 已写入 PCM 缓冲区, 样本数: " + targetWindowSize);
                             } else {
-                                long segmentStartTimestamp = bufferInfo.presentationTimeUs / 1000L;
-
-                                Log.d(TAG, "📤 bufferInfo pts(ms): " + (bufferInfo.presentationTimeUs / 1000L));
+                                Log.d(TAG, "📤 [FIX] 使用窗口起始时间戳(ms): " + segmentStartTimestamp);
                                 Log.d(TAG, "📤 [write] bufferPos = " + bufferPos + ", sampleRate = " + sampleRate + ", segmentStartTimestamp = " + segmentStartTimestamp);
                                 pcmBuffer.write(audioBuffer, segmentStartTimestamp, sampleRate);
                                 Log.d(TAG, "✅ 原始采样率写入 PCM 缓冲区: " + bufferPos + " 样本");
                             }
 
                             bufferPos = 0;
+                            windowStartPtsMs = -1;  // ✅ [FIX] 重置，准备下一个窗口
                             windowCount++;
                         }
 
@@ -337,4 +347,3 @@ public class AudioDecoder {
 
 
 }
-
