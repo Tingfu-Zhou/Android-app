@@ -108,7 +108,7 @@ public class MainActivity extends AppCompatActivity {
                     btnResumeControl.setEnabled(true);
                     btnResumeControl.setText("已暂停app操作，点击恢复");
                     btnResumeControl.setAlpha(1.0f); // 完全不透明
-                    Toast.makeText(this, "设备正在本地控制，点击按钮恢复", Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, "设备正在本地控制，暂停app控制", Toast.LENGTH_LONG).show();
                 } else {
                     btnResumeControl.setEnabled(false);
                     btnResumeControl.setText("已恢复控制");

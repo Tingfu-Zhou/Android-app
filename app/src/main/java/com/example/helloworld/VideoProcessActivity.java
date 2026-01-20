@@ -895,7 +895,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 更新UI, 显示蓝牙实际发送的动作
                 String bluetoothAction = latestBluetoothAction.get();
                 if (!bluetoothAction.isEmpty()) {
-                    tvOverlay.setText("蓝牙: " + bluetoothAction + "节奏：" + finalFreq);
+                    tvOverlay.setText("蓝牙: " + bluetoothAction + "节奏：" + currentLevel);
                 } else {
                     tvOverlay.setText("蓝牙发送等待识别...");
                 }
