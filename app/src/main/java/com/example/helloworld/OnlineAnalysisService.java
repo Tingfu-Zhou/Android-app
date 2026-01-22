@@ -120,19 +120,19 @@ public class OnlineAnalysisService extends Service {
     // 新增：更新悬浮窗的UI方法
     public void updateFloatingVideoAction(final String text) {
         if (tvVideoAction != null) {
-            mainHandler.post(() -> tvVideoAction.setText(text));
+            // mainHandler.post(() -> tvVideoAction.setText(text)); 正式版隐藏悬浮窗调试UI
         }
     }
 
     public void updateFloatingAudioAction(final String text) {
         if (tvAudioAction != null) {
-            mainHandler.post(() -> tvAudioAction.setText(text));
+            // mainHandler.post(() -> tvAudioAction.setText(text)); 正式版隐藏悬浮窗调试UI
         }
     }
 
     public void updateFloatingFusionResult(final String text) {
         if (tvOverlay != null) {
-            mainHandler.post(() -> tvOverlay.setText(text));
+            // mainHandler.post(() -> tvOverlay.setText(text)); 正式版隐藏悬浮窗调试UI
         }
     }
     // ======= 添加结束 =======
@@ -486,6 +486,13 @@ public class OnlineAnalysisService extends Service {
         tvAudioAction = floatingView.findViewById(R.id.tvAudioAction);
         tvOverlay = floatingView.findViewById(R.id.tvOverlay);
         // ======= 添加结束 =======
+
+        // ======= [ADD] 正式版隐藏悬浮窗调试UI =======
+        if (tvVideoAction != null) tvVideoAction.setVisibility(View.GONE);
+        if (tvAudioAction != null) tvAudioAction.setVisibility(View.GONE);
+        if (tvOverlay != null) tvOverlay.setVisibility(View.GONE);
+        // ======= [ADD END] =======
+
 
         // 设置悬浮窗参数
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(

@@ -32,7 +32,7 @@
             android:id="@+id/tvVideoAction"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Video Action: "
+            android:text="V: "
             android:textSize="18sp"
             android:textColor="#FFDD00" />
 
@@ -40,7 +40,7 @@
             android:id="@+id/tvAudioAction"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Audio Action: "
+            android:text="A: "
             android:textSize="18sp"
             android:textColor="#00DDEE" />
 
@@ -48,7 +48,7 @@
             android:id="@+id/tvOverlay"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Final Action: "
+            android:text="蓝牙: "
             android:textSize="20sp"
             android:textColor="#FF0000" />
     </LinearLayout>
@@ -63,4 +63,16 @@
         android:background="@android:color/transparent"
         android:src="@drawable/ic_fullscreen"
         android:contentDescription="全屏切换按钮" />
+
+    <!-- 返回按钮 - 添加在全屏按钮之后或任意位置 -->
+    <ImageButton
+        android:id="@+id/btnBack"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="top|start"
+        android:layout_margin="16dp"
+        android:background="#66000000"
+        android:src="@drawable/ic_back"
+        android:contentDescription="返回主页面"
+        android:padding="8dp" />
 </FrameLayout>

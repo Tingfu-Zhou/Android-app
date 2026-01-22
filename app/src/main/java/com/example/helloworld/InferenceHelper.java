@@ -32,12 +32,7 @@ public class InferenceHelper {
     // ST-GCN++ 输入
     private static final int STGCN_BATCH = 1, STGCN_CHANNEL = 3, STGCN_TIME = 32, STGCN_VERTEX = 17, STGCN_M = 1;
 
-    // Tiny-ST-GCN++ 二分类模型常量
-    private static final int BIN_BATCH  = 1;
-    private static final int BIN_CHAN   = 3;
-    private static final int BIN_TIME   = 8;      // ★ 8 帧
-    private static final int BIN_VERT   = 17;
-    private static final int BIN_M      = 1;
+
 
     private OrtSession tinyBinSession;            // ★ 新增
 
@@ -155,52 +150,6 @@ public class InferenceHelper {
                     Log.e(TAG, "[MLKit] 推理异常: ", e);
                     listener.onResult(null);
                 });
-    }
-
-    /**
-     * Tiny-ST-GCN++ 二分类器
-     * @param poseWindow [T=8][V=17][C=3]
-     * @return 目标动作(label 0) 的概率 ∈ [0,1]
-     */
-    public float runBinary(float[][][] poseWindow) {
-        if (tinyBinSession == null) {
-            Log.e(TAG, "tinyBinSession 未初始化！");
-            return 1.0f;                 // 容错：全部放行
-        }
-        try {
-            // 1) 展平成 1-D float[]
-            float[] flat = new float[BIN_BATCH * BIN_CHAN * BIN_TIME * BIN_VERT * BIN_M];
-            for (int c = 0; c < BIN_CHAN; c++)
-                for (int t = 0; t < BIN_TIME; t++)
-                    for (int v = 0; v < BIN_VERT; v++)
-                        flat[((c * BIN_TIME + t) * BIN_VERT + v)] = poseWindow[t][v][c];
-
-            // 2) 构建 Tensor
-            long[] shape = {BIN_BATCH, BIN_CHAN, BIN_TIME, BIN_VERT, BIN_M};
-            OnnxTensor inTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(flat), shape);
-
-            // 3) 推理
-            OrtSession.Result res = tinyBinSession.run(Collections.singletonMap("input", inTensor));
-
-            /* 4.  计算目标类(label 0) 概率 */
-            // 取出 batch=0 的两维 logit
-            float[] logits = ((float[][]) res.get(0).getValue())[0]; // logits.length == 2
-            float logit0   = logits[0];      // label 0 的原始分数
-            float logit1   = logits[1];      // label 1 的原始分数
-            // 数值安全 Softmax → 取 label 0 概率
-            float maxLogit = logit0 > logit1 ? logit0 : logit1;      // 与 Math.max 等价
-            double exp0    = Math.exp(logit0 - maxLogit);
-            double exp1    = Math.exp(logit1 - maxLogit);
-            float prob     = (float) (exp0 / (exp0 + exp1));         // label 0 概率
-
-            // 5) 资源释放
-            res.close();
-            inTensor.close();
-            return prob;
-        } catch (Exception e) {
-            Log.e(TAG, "runTinyBinary error: " + e.getMessage());
-            return 1.0f;                 // 发生异常时宁可放行
-        }
     }
 
 

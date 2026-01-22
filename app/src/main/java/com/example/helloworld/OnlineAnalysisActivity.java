@@ -492,10 +492,13 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             float[][] keypoints = keypointsRaw[0][0];
 
             // 归一化关键点
+            // [MOD] 归一化关键点：对齐 Windows 的 preNormalize2D 前置假设（先到 [0,1]）
+            // 注意：keypoints[i][2] (conf) 保持不变
             for (int i = 0; i < keypoints.length; i++) {
-                keypoints[i][0] = (keypoints[i][0] - TARGET_WIDTH / 2.0f) / (TARGET_WIDTH / 2.0f);
-                keypoints[i][1] = (keypoints[i][1] - TARGET_HEIGHT / 2.0f) / (TARGET_HEIGHT / 2.0f);
+                keypoints[i][0] = keypoints[i][0] / (float) TARGET_WIDTH;
+                keypoints[i][1] = keypoints[i][1] / (float) TARGET_HEIGHT;
             }
+
 
             // === NEW: 将归一化后的关键点推入“视频节律器” ===
             // 注意：只在“本帧有人体关键点可用”时调用；若你的管线里可能出现 kp==null，就先判空。
@@ -537,6 +540,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 framesSinceLastMulti = 0;
 
                 float[][][] input = convertPoseWindowToInput(poseWindow);
+                // [MOD] 对齐 Windows：窗口级 bbox 归一化（MMAction2 PreNormalize2D）
+                input = preNormalize2D(input);
                 long tStgcnStart = System.currentTimeMillis();
                 float[] scores = inferenceHelper.runStgcnModel(input);
                 long tStgcnEnd = System.currentTimeMillis();
@@ -1185,6 +1190,46 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         }
         return input;
     }
+
+    // =========================
+    // [ADD] 对齐 Windows(ActionUtils.preNormalize2D)：窗口级 bbox 中心化 + 等比缩放
+    // 输入: float[T][V][3]  (x,y,conf) 其中 conf<=0 视为无效点
+    // 输出: 同维度
+    // =========================
+    private static float[][][] preNormalize2D(float[][][] window) {
+        float xMin = Float.MAX_VALUE, yMin = Float.MAX_VALUE;
+        float xMax = Float.MIN_VALUE, yMax = Float.MIN_VALUE;
+
+        for (float[][] frame : window) {
+            for (float[] kp : frame) {
+                if (kp[2] <= 0f) continue;      // 仅统计有效关键点
+                xMin = Math.min(xMin, kp[0]);
+                yMin = Math.min(yMin, kp[1]);
+                xMax = Math.max(xMax, kp[0]);
+                yMax = Math.max(yMax, kp[1]);
+            }
+        }
+
+        if (xMax < xMin) { // 全无有效点
+            xMin = 0f; yMin = 0f; xMax = 1f; yMax = 1f;
+        }
+
+        float cx = 0.5f * (xMin + xMax);
+        float cy = 0.5f * (yMin + yMax);
+        float scale = Math.max(xMax - xMin, yMax - yMin);
+        if (scale < 1e-6f) scale = 1e-6f;
+
+        float[][][] out = new float[window.length][window[0].length][3];
+        for (int t = 0; t < window.length; t++) {
+            for (int v = 0; v < window[0].length; v++) {
+                out[t][v][0] = (window[t][v][0] - cx) / scale;
+                out[t][v][1] = (window[t][v][1] - cy) / scale;
+                out[t][v][2] =  window[t][v][2];
+            }
+        }
+        return out;
+    }
+
 
     private float[] softmax(float[] logits) {
         float maxLogit = Float.NEGATIVE_INFINITY;
