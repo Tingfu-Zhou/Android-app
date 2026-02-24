@@ -349,9 +349,8 @@ public class BLEManager {
 
         // 将VideoProcessActivity的动作映射到蓝牙协议
         String mappedAction = mapAction(action);
-        byte[] frame = buildFrameForAction(mappedAction);
-        // 马达强度
-        LEVEL = finalFreq;
+        LEVEL = finalFreq;                                  // ★ 移到这里：先更新强度
+        byte[] frame = buildFrameForAction(mappedAction);   // 再构建帧（读取新的 LEVEL）
 
         if (frame != null) {
             writeRx(frame);

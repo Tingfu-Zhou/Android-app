@@ -440,6 +440,13 @@ public class OnlineAnalysisService extends Service {
                                     mainHandler.post(() -> dataCallback.onAudioStateChanged(false));
                                 }
                                 Log.d(TAG, "音频静音超过" + SILENCE_THRESHOLD_MS + "ms，暂停分析");
+
+                                // ★ 新增：静音时发送停止信号
+                                if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()
+                                        && !BLEManager.globalManager.isPausedByLocal()) {
+                                    BLEManager.globalManager.sendAction("Noise", 0);
+                                    Log.i(TAG, "[在线模式] 静音检测，已发送停止信号(Noise)");
+                                }
                             }
                         } else {
                             // 如果静音帧数不够，仍然发送数据（可能只是短暂静音）
@@ -554,6 +561,12 @@ public class OnlineAnalysisService extends Service {
         // ======= 添加开始：清除实例引用 =======
         instance = null;
         // ======= 添加结束 =======
+
+        // ★ 新增：退出在线模式时发送停止信号
+        if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
+            BLEManager.globalManager.sendAction("Noise", 0);
+            Log.i(TAG, "[在线模式] 退出服务，已发送停止信号(Noise)");
+        }
 
         // 停止音频录制
         isAudioRecording.set(false);
