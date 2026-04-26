@@ -3,6 +3,8 @@
     <string name="home_subtitle">视频联动智能控制</string>
     <string name="bluetooth_label">蓝牙设备</string>
     <string name="bluetooth_status_disconnected">未连接</string>
+    <string name="bluetooth_status_connected">已连接</string>
+    <string name="bluetooth_status_scanning">扫描中…</string>
     <string name="section_video_source">视频源</string>
     <string name="mode_local_title">本地视频</string>
     <string name="mode_local_subtitle">从相册选择</string>

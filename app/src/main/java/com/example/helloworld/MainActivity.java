@@ -7,6 +7,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.Button;
+import android.widget.TextView;
 import androidx.appcompat.app.AlertDialog;
 import android.widget.Toast;
 import android.net.ConnectivityManager;
@@ -29,6 +30,7 @@ public class MainActivity extends AppCompatActivity {
     private View btnSelectVideo; // [MD3] 改为 MaterialCardView，用 View 引用
     private Button btnConnectBluetooth; // [修改] 改为真实BLE连接按钮
     private Button btnResumeControl;    // [新增] 恢复控制按钮
+    private TextView tvBluetoothStatus; // [MD3] 蓝牙状态副文本
     private static final int REQUEST_CODE_SELECT_VIDEO = 101;
     private boolean updateDialogShown = false;
 
@@ -61,6 +63,7 @@ public class MainActivity extends AppCompatActivity {
         btnSelectVideo = findViewById(R.id.btnSelectVideo);
         btnConnectBluetooth = findViewById(R.id.btnConnectBluetooth);
         btnResumeControl = findViewById(R.id.btnResumeControl); // [新增] 恢复控制按钮
+        tvBluetoothStatus = findViewById(R.id.tvBluetoothStatus); // [MD3] 蓝牙状态副文本
 
         // [新增] 初始化BLE管理器
         bleManager = new BLEManager(this);
@@ -74,10 +77,12 @@ public class MainActivity extends AppCompatActivity {
                     if (connected) {
                         btnConnectBluetooth.setText("断开蓝牙");
                         btnConnectBluetooth.setEnabled(true);
+                        tvBluetoothStatus.setText(R.string.bluetooth_status_connected);
                         Toast.makeText(MainActivity.this, "蓝牙已连接", Toast.LENGTH_SHORT).show();
                     } else {
                         btnConnectBluetooth.setText("连接蓝牙设备");
                         btnConnectBluetooth.setEnabled(true);
+                        tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
                         Toast.makeText(MainActivity.this, "蓝牙已断开", Toast.LENGTH_SHORT).show();
                     }
                 });
@@ -88,6 +93,7 @@ public class MainActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     btnConnectBluetooth.setText("扫描中...");
                     btnConnectBluetooth.setEnabled(false);
+                    tvBluetoothStatus.setText(R.string.bluetooth_status_scanning);
                 });
             }
 
@@ -96,6 +102,7 @@ public class MainActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     btnConnectBluetooth.setText("连接蓝牙设备");
                     btnConnectBluetooth.setEnabled(true);
+                    tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
                     Toast.makeText(MainActivity.this, reason, Toast.LENGTH_LONG).show();
                 });
             }
@@ -153,6 +160,7 @@ public class MainActivity extends AppCompatActivity {
                     // 断开连接
                     bleManager.disconnect();
                     btnConnectBluetooth.setText("连接蓝牙设备");
+                    tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
                 }
             }
         });
@@ -253,8 +261,10 @@ public class MainActivity extends AppCompatActivity {
         // [新增] 更新连接按钮状态
         if (bleManager != null && bleManager.isConnected()) {
             btnConnectBluetooth.setText("断开蓝牙");
+            tvBluetoothStatus.setText(R.string.bluetooth_status_connected);
         } else {
             btnConnectBluetooth.setText("连接蓝牙设备");
+            tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
         }
 
         // 版本检查逻辑（保持不变）
