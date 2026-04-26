@@ -26,7 +26,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 public class MainActivity extends AppCompatActivity {
-    private Button btnSelectVideo;
+    private View btnSelectVideo; // [MD3] 改为 MaterialCardView，用 View 引用
     private Button btnConnectBluetooth; // [修改] 改为真实BLE连接按钮
     private Button btnResumeControl;    // [新增] 恢复控制按钮
     private static final int REQUEST_CODE_SELECT_VIDEO = 101;
@@ -168,7 +168,7 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        Button btnOnlineAnalysis = findViewById(R.id.btnOnlineAnalysis);
+        View btnOnlineAnalysis = findViewById(R.id.btnOnlineAnalysis); // [MD3] MaterialCardView
         btnOnlineAnalysis.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {

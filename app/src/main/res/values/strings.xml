@@ -1,3 +1,13 @@
 <resources>
     <string name="app_name">Xcup</string>
+    <string name="home_subtitle">视频联动智能控制</string>
+    <string name="bluetooth_label">蓝牙设备</string>
+    <string name="bluetooth_status_disconnected">未连接</string>
+    <string name="section_video_source">视频源</string>
+    <string name="mode_local_title">本地视频</string>
+    <string name="mode_local_subtitle">从相册选择</string>
+    <string name="mode_online_title">在线分析</string>
+    <string name="mode_online_subtitle">浏览器视频</string>
+    <string name="resume_control_inactive">暂停控制（未激活）</string>
+    <string name="connect_bluetooth">连接蓝牙设备</string>
 </resources>
