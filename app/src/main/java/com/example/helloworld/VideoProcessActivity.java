@@ -74,7 +74,7 @@ public class VideoProcessActivity extends AppCompatActivity {
     private final AtomicReference<Long> latestAudioTimestamp = new AtomicReference<>(0L);
 
     // 7.19 新增：时间窗口平滑相关变量
-    private static final int SMOOTH_WINDOW_SIZE = 10; // 融合分析平滑窗口的大小 10（10帧 × 100ms = 1000ms = 1秒）
+    private static final int SMOOTH_WINDOW_SIZE = 10; // 融合分析平滑窗口的大小 10
     private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
     private final Object historyLock = new Object(); // 用于同步访问actionHistory
 
