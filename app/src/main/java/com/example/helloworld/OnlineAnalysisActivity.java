@@ -135,8 +135,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     //音频节奏
     // private final AudioRhythmEstimator rhythmEstimator = new AudioRhythmEstimator(16000);
 
-    // 视频节律器
-    private final VideoRhythmEstimator videoRhythmEstimator = new VideoRhythmEstimator();
+    // 视频节律器（新版：基于 ROI 块运动 + 泄漏积分 + 自相关主频）
+    private final VideoMotionWaveEstimator videoMotionWaveEstimator = new VideoMotionWaveEstimator();
     // 音频节奏
     /*
     private final java.util.concurrent.atomic.AtomicReference<Float> latestAudioRhythmHz =
@@ -460,10 +460,12 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     if (frame != null && !frame.isRecycled()) {  // ======= 修改：检查bitmap是否已回收 =======
                         // ML Kit姿态检测（异步）
                         long tMMPoseStart = System.currentTimeMillis();
+                        // capture frame 供 processVideoFrame 透传给视频运动波形估计器
+                        final Bitmap capturedFrame = frame;
                         inferenceHelper.runPoseModelViaMLKit(frame, keypointsRaw -> {
                             long tMMPoseEnd = System.currentTimeMillis();
                             Log.d(TAG, "[计时] MLKit 关键点检测耗时: " + (tMMPoseEnd - tMMPoseStart) + " ms");
-                            processVideoFrame(keypointsRaw);
+                            processVideoFrame(capturedFrame, keypointsRaw);
                         });
 
                         // ======= 修改：不要立即回收，让ML Kit处理完成后自动管理 =======
@@ -482,10 +484,17 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         videoHandler.post(videoRunnable);
     }
 
-    private void processVideoFrame(float[][][][] keypointsRaw) {
+    private void processVideoFrame(Bitmap frame, float[][][][] keypointsRaw) {
         synchronized (videoLock) {
+            long framePtsMs = System.currentTimeMillis();
+
             if (keypointsRaw == null || keypointsRaw.length == 0) {
                 Log.w(TAG, "[视频线程] ML Kit 返回为null");
+                // === 镜头切换 / 无人体：通知视频运动波形估计器 ===
+                videoMotionWaveEstimator.pushFrame(framePtsMs, null, null);
+                latestVideoFreqHz.set(Float.NaN);
+                latestVideoFreqConf.set(0f);
+                latestVideoFreqTsMs.set(0);
                 return;
             }
 
@@ -500,29 +509,24 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             }
 
 
-            // === NEW: 将归一化后的关键点推入“视频节律器” ===
-            // 注意：只在“本帧有人体关键点可用”时调用；若你的管线里可能出现 kp==null，就先判空。
-            if (keypoints != null) {
-                // framePtsMs：请用你当前这一帧对应的播放/展示时间戳（你已有的变量）
-                long framePtsMs = System.currentTimeMillis();
-
-                videoRhythmEstimator.onPoseFrame(keypoints, framePtsMs);
-
-                // 拉取最新估计值并存储（先不进主融合）
-                float f = videoRhythmEstimator.getLatestFreqHz();
-                float c = videoRhythmEstimator.getLatestConf();
-                long  t = videoRhythmEstimator.getLatestTsMs();
-
-                latestVideoFreqHz.set(f);
-                latestVideoFreqConf.set(c);
-                latestVideoFreqTsMs.set(t);
-                Log.d(TAG, String.format("[频率测试] [在线模式] 视频节奏 - 频率:%.2f Hz, 置信度:%.2f", f, c));
-            } else{
-                // === NEW: Seek/镜头切换时同步重置节律器与缓存 ===
-                videoRhythmEstimator.reset();
+            // === 将原始帧 + 归一化关键点推入“视频运动波形估计器” ===
+            // 关键点仅用于 ROI 定位；节律来自 ROI 内块运动 → 泄漏积分 → 自相关。
+            videoMotionWaveEstimator.pushFrame(framePtsMs, frame, keypoints);
+            VideoWaveResult vwr = videoMotionWaveEstimator.getLatestResult();
+            if (vwr != null && vwr.valid) {
+                latestVideoFreqHz.set(vwr.freqHz);
+                latestVideoFreqConf.set(vwr.confidence);
+                latestVideoFreqTsMs.set(vwr.timestampMs);
+                Log.d(TAG, String.format(
+                        "[频率测试] [在线模式] 视频运动波形 - f=%.2fHz, conf=%.2f, per=%.2f, mE=%.3f, pos01=%.2f, locked=%s",
+                        vwr.freqHz, vwr.confidence, vwr.periodicity, vwr.motionEnergy,
+                        vwr.position01, String.valueOf(vwr.locked)));
+                Log.d(TAG, "[VideoWave] " + vwr.debugInfo);
+            } else {
                 latestVideoFreqHz.set(Float.NaN);
                 latestVideoFreqConf.set(0f);
-                latestVideoFreqTsMs.set(0);
+                latestVideoFreqTsMs.set(framePtsMs);
+                if (vwr != null) Log.d(TAG, "[VideoWave] " + vwr.debugInfo);
             }
 
 
@@ -1291,7 +1295,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         latestAudioLoudValid.set(false);
 
         //清空视频频率控制
-        videoRhythmEstimator.reset();
+        videoMotionWaveEstimator.reset();
         latestVideoFreqHz.set(Float.NaN);
         latestVideoFreqConf.set(0f);
         latestVideoFreqTsMs.set(0);
