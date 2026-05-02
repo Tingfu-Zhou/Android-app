@@ -17,6 +17,8 @@ package com.example.helloworld;
  *  - motionEnergy  : 当前帧 ROI 内运动强度（block dy 的平均绝对值，越大越剧烈）。
  *  - periodicity   : 自相关主峰的相对强度，0..1。
  *  - roiX/Y/W/H    : ROI 在原始视频帧像素坐标系中的位置与大小（int 像素）。
+ *  - mainDirX/Y    : 当前估计的主运动方向单位向量（PCA + EMA + 符号稳定）；
+ *                    默认 (0,1) 表示竖直向下；旧版 dy-only 行为对应此默认值。
  *  - locked        : 当前是否处于稳定锁定状态（连续帧 ROI 都成功且窗口已预热）。
  *  - valid         : 当前结果是否可用（false 表示尚未预热完成或被 reset）。
  *  - debugInfo     : 调试用日志字符串，包含 ROI / blocks / signedDy / freq 等关键中间量。
@@ -33,6 +35,8 @@ public class VideoWaveResult {
     public int   roiY;
     public int   roiW;
     public int   roiH;
+    public float mainDirX;
+    public float mainDirY;
     public boolean locked;
     public boolean valid;
     public String debugInfo;
@@ -48,6 +52,8 @@ public class VideoWaveResult {
         r.motionEnergy = 0f;
         r.periodicity  = 0f;
         r.roiX = r.roiY = r.roiW = r.roiH = 0;
+        r.mainDirX = 0f;
+        r.mainDirY = 1f;   // 默认竖直方向，行为退化到旧的 dy-only
         r.locked = false;
         r.valid  = false;
         r.debugInfo = "empty";
@@ -65,6 +71,8 @@ public class VideoWaveResult {
         r.motionEnergy = this.motionEnergy;
         r.periodicity  = this.periodicity;
         r.roiX = this.roiX; r.roiY = this.roiY; r.roiW = this.roiW; r.roiH = this.roiH;
+        r.mainDirX = this.mainDirX;
+        r.mainDirY = this.mainDirY;
         r.locked = this.locked;
         r.valid  = this.valid;
         r.debugInfo = this.debugInfo;
