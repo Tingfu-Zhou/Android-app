@@ -43,7 +43,8 @@ public class VideoMotionWaveEstimator {
         public float roiMinFracH       = 0.12f;   // ROI 最小高度（占帧高比例）
         public float roiMaxFracW       = 0.85f;   // ROI 最大宽度（占帧宽比例）
         public float roiMaxFracH       = 0.85f;   // ROI 最大高度（占帧高比例）
-        public float kpConfTh          = 0.30f;   // 关键点置信度阈值
+        public float kpConfTh          = 0.30f;   // 普通关键点置信度阈值（用于膝/肩等辅助点）
+        public float pelvisKpConfTh    = 0.30f;   // 骨盆（左右 hip）置信度门控；任一低于该值则本轮直接输出 NaN
 
         // ---- Gray ROI ----
         public int grayW = 64;
@@ -178,6 +179,32 @@ public class VideoMotionWaveEstimator {
             consecutiveLost++;
             roiLost = true;
             decayConfidence(timestampMs, "no-frame");
+            return;
+        }
+
+        // ---- (a.1) Pelvis 置信度门控 ----
+        // 关键点格式 [x, y, conf]；左右 hip 任一 conf 低于阈值，本轮直接输出 NaN，
+        // 不更新 ROI/position 窗口。长时间命中 -> reset()，与无人体路径一致。
+        final int LHIP = 11, RHIP = 12;
+        if (keypointsNorm.length < 17
+                || keypointsNorm[LHIP] == null || keypointsNorm[LHIP].length < 3
+                || keypointsNorm[RHIP] == null || keypointsNorm[RHIP].length < 3
+                || keypointsNorm[LHIP][2] < P.pelvisKpConfTh
+                || keypointsNorm[RHIP][2] < P.pelvisKpConfTh) {
+            float cL = (keypointsNorm.length > LHIP && keypointsNorm[LHIP] != null
+                        && keypointsNorm[LHIP].length >= 3) ? keypointsNorm[LHIP][2] : 0f;
+            float cR = (keypointsNorm.length > RHIP && keypointsNorm[RHIP] != null
+                        && keypointsNorm[RHIP].length >= 3) ? keypointsNorm[RHIP][2] : 0f;
+            consecutiveLost++;
+            roiLost = true;
+            if (consecutiveLost >= P.maxConsecutiveLostBeforeReset) {
+                if (P.verbose) Log.d(TAG, "[reset] low-pelvis-conf x" + consecutiveLost);
+                reset();
+            } else {
+                publishNaN(timestampMs, String.format(java.util.Locale.US,
+                        "low-pelvis-conf Lhip=%.2f Rhip=%.2f th=%.2f",
+                        cL, cR, P.pelvisKpConfTh));
+            }
             return;
         }
         consecutiveLost = 0;
@@ -375,76 +402,71 @@ public class VideoMotionWaveEstimator {
         latest.set(upd);
     }
 
+    /** 显式把本轮结果置为 NaN（调用方：pelvis 置信度门控未通过等情形）。 */
+    private void publishNaN(long timestampMs, String reason) {
+        VideoWaveResult r = new VideoWaveResult();
+        r.timestampMs  = timestampMs;
+        r.freqHz       = Float.NaN;
+        r.confidence   = 0f;
+        r.position01   = lastPos01;
+        r.rawPosition  = rawPosition;
+        r.motionEnergy = 0f;
+        r.periodicity  = 0f;
+        r.roiX = r.roiY = r.roiW = r.roiH = 0;
+        r.locked = false;
+        r.valid  = false;
+        r.debugInfo = "[NaN] " + reason;
+        latest.set(r);
+    }
+
     // ===================== ROI 计算 =====================
     private static class RoiBox { float cx, cy, w, h; }
 
     private RoiBox computeRoi(float[][] kp, int frameW, int frameH) {
         // COCO 关键点索引
-        final int LSHO=5, RSHO=6, LHIP=11, RHIP=12, LKNEE=13, RKNEE=14, LANK=15, RANK=16;
+        final int LSHO=5, RSHO=6, LHIP=11, RHIP=12, LKNEE=13, RKNEE=14;
         if (kp == null || kp.length < 17) return null;
 
-        boolean lhipOK  = kp[LHIP][2]  >= P.kpConfTh;
-        boolean rhipOK  = kp[RHIP][2]  >= P.kpConfTh;
+        // 调用方（pushFrame）已经做过 pelvis 置信度门控，此处只保留防御性检查。
+        // 不再走 bbox fallback：若骨盆点不可用，本轮已直接 publishNaN 返回。
+        if (kp[LHIP][2] < P.pelvisKpConfTh || kp[RHIP][2] < P.pelvisKpConfTh) return null;
+
         boolean lkneeOK = kp[LKNEE][2] >= P.kpConfTh;
         boolean rkneeOK = kp[RKNEE][2] >= P.kpConfTh;
         boolean lshoOK  = kp[LSHO][2]  >= P.kpConfTh;
         boolean rshoOK  = kp[RSHO][2]  >= P.kpConfTh;
 
-        float cx, cy, w, h;
+        // ---- 主路径（也是唯一路径）：基于 hip / lower-body ----
+        float hipCx = 0.5f * (kp[LHIP][0] + kp[RHIP][0]);
+        float hipCy = 0.5f * (kp[LHIP][1] + kp[RHIP][1]);
+        float hipDx = kp[RHIP][0] - kp[LHIP][0];
+        float hipDy = kp[RHIP][1] - kp[LHIP][1];
+        float hipDist = (float) Math.sqrt(hipDx * hipDx + hipDy * hipDy);
 
-        if (lhipOK && rhipOK) {
-            // ---- 主路径：基于 hip / lower-body ----
-            float hipCx = 0.5f * (kp[LHIP][0] + kp[RHIP][0]);
-            float hipCy = 0.5f * (kp[LHIP][1] + kp[RHIP][1]);
-            float hipDx = kp[RHIP][0] - kp[LHIP][0];
-            float hipDy = kp[RHIP][1] - kp[LHIP][1];
-            float hipDist = (float) Math.sqrt(hipDx * hipDx + hipDy * hipDy);
-
-            float refSize = hipDist;
-            // 兜底（两 hip 太接近时）：用肩宽
-            if (refSize < 0.04f && lshoOK && rshoOK) {
-                float sdx = kp[RSHO][0] - kp[LSHO][0];
-                float sdy = kp[RSHO][1] - kp[LSHO][1];
-                refSize = (float) Math.sqrt(sdx * sdx + sdy * sdy);
-            }
-            if (refSize < 0.03f) refSize = 0.03f;
-
-            // 估计纵向尺度：优先 hip-knee 距离
-            float vert = refSize * 1.6f;
-            if (lkneeOK || rkneeOK) {
-                float kneeY = 0f; int n = 0;
-                if (lkneeOK) { kneeY += kp[LKNEE][1]; n++; }
-                if (rkneeOK) { kneeY += kp[RKNEE][1]; n++; }
-                kneeY /= n;
-                float v = Math.abs(kneeY - hipCy);
-                if (v > vert * 0.5f) vert = v * 1.4f;
-            }
-
-            cx = hipCx;
-            cy = hipCy + P.roiVerticalShift * vert;
-            w  = refSize * P.roiWidthFactor;
-            h  = vert    * P.roiHeightFactor;
-        } else {
-            // ---- Fallback：bbox 中下部 ----
-            float minX = 2f, minY = 2f, maxX = -1f, maxY = -1f;
-            int valid = 0;
-            for (int i = 0; i < kp.length; i++) {
-                if (kp[i][2] >= P.kpConfTh) {
-                    if (kp[i][0] < minX) minX = kp[i][0];
-                    if (kp[i][1] < minY) minY = kp[i][1];
-                    if (kp[i][0] > maxX) maxX = kp[i][0];
-                    if (kp[i][1] > maxY) maxY = kp[i][1];
-                    valid++;
-                }
-            }
-            if (valid < 4) return null;
-            float bw = maxX - minX, bh = maxY - minY;
-            if (bw < 0.08f || bh < 0.10f) return null;
-            cx = (minX + maxX) * 0.5f;
-            cy = minY + bh * 0.70f;       // 偏向下半部
-            w  = bw * 0.85f;
-            h  = bh * 0.55f;
+        float refSize = hipDist;
+        // 兜底（两 hip 像素距太近时）：改用肩宽估计参考尺度
+        if (refSize < 0.04f && lshoOK && rshoOK) {
+            float sdx = kp[RSHO][0] - kp[LSHO][0];
+            float sdy = kp[RSHO][1] - kp[LSHO][1];
+            refSize = (float) Math.sqrt(sdx * sdx + sdy * sdy);
         }
+        if (refSize < 0.03f) refSize = 0.03f;
+
+        // 估计纵向尺度：优先 hip-knee 距离
+        float vert = refSize * 1.6f;
+        if (lkneeOK || rkneeOK) {
+            float kneeY = 0f; int n = 0;
+            if (lkneeOK) { kneeY += kp[LKNEE][1]; n++; }
+            if (rkneeOK) { kneeY += kp[RKNEE][1]; n++; }
+            kneeY /= n;
+            float v = Math.abs(kneeY - hipCy);
+            if (v > vert * 0.5f) vert = v * 1.4f;
+        }
+
+        float cx = hipCx;
+        float cy = hipCy + P.roiVerticalShift * vert;
+        float w  = refSize * P.roiWidthFactor;
+        float h  = vert    * P.roiHeightFactor;
 
         // 归一化 → 像素
         cx *= frameW; cy *= frameH;
