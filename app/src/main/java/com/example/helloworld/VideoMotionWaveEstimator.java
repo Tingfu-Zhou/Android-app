@@ -316,6 +316,14 @@ public class VideoMotionWaveEstimator {
             VideoWaveResult result = doEstimate(timestampMs, rx, ry, rw, rh,
                     signedMotion, motionEnergy, validBlocks, totalBlocks);
             latest.set(result);
+            // [ADD] 直接打印视频波形节律调试信息
+            Log.d(TAG, "[节律测试] [视频波形节律] freqHz=" + result.freqHz
+                    + " confidence=" + result.confidence
+                    + " position01=" + result.position01
+                    + " valid=" + result.valid
+                    + " locked=" + result.locked
+                    + " debug=" + result.debugInfo);
+
             if (P.verbose) Log.d(TAG, "[est] " + result.debugInfo);
         } else {
             // 未到估计节拍：仅刷新最新调试字段，不算 valid
@@ -336,6 +344,8 @@ public class VideoMotionWaveEstimator {
                     (float) (Math.atan2(mainDirY, mainDirX) * 180.0 / Math.PI),
                     posCount);
             latest.set(upd);
+            // [ADD] 预热阶段也打印，方便确认模块是否正在运行
+            Log.d(TAG, "[节律测试] [视频波形节律-warm] " + upd.debugInfo);
         }
     }
 
