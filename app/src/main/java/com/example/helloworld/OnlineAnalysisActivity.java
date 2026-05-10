@@ -585,10 +585,10 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                         actionClass = "Noise";
                         bestScore = 1.0f;
                         Log.d(TAG, String.format(
-                                "[同步分析] 视频分析判定为 Noise (最大概率=%.3f < 阈值)",
+                                "[测试] 视频分析判定为 Noise (最大概率=%.3f < 阈值)",
                                 bestScore));
                     } else {
-                        Log.d(TAG, String.format("[同步分析] 视频识别结果: %s (p=%.2f)",
+                        Log.d(TAG, String.format("[测试] 视频识别结果: %s (p=%.2f)",
                                 actionClass, bestScore));
                         // 输出详细的概率分布
                         Log.d(TAG, String.format("[视频线程] 概率分布: oral=%.3f, do=%.3f, noise_stand=%.3f, noise_sit=%.3f",
@@ -699,7 +699,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                                     confidence = 1.0f - confidence;
                                     Log.d(TAG, "[同步分析] Noise置信度过低(" + confidence + ")，转换为 do，新置信度=" + confidence);
                                 }
-                                Log.d(TAG, String.format("[同步分析] 音频动作识别结果: %s (p=%.2f)", action, confidence));
+                                Log.d(TAG, String.format("[测试] 音频动作识别结果: %s (p=%.2f)", action, confidence));
 
                                 latestAudioAction.set(action);
                                 latestAudioConfidence.set(confidence);
@@ -886,18 +886,18 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         for (int lvl = 1; lvl <= 10; lvl++) {
             float[] r = LEVEL_RANGES[lvl];
             if (r != null && hz >= r[0] && hz < r[1]) {
-                return Math.min(lvl, 9);
+                return Math.min(lvl, 8);   // 9、10 都折叠到 8
             }
         }
-        return 9; // 超出则钳到最高档
+        return 8;                          // 超出最高档也钳到 8
     }
 
-    // [12.30] audioFreq 实际承载的是 loudness level（float），这里做 0..9 钳制
+    // [ADD] audioFreq 实际承载的是 loudness level（float），这里做 0..8 钳制
     private static int clampLevelFromLoudness(final float levelLike) {
         if (Float.isNaN(levelLike)) return 0;
         int lv = Math.round(levelLike);
         if (lv < 0) lv = 0;
-        if (lv > 9) lv = 9;
+        if (lv > 8) lv = 8;
         return lv;
     }
 
@@ -1084,8 +1084,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             Log.d(TAG, String.format("[蓝牙] 检测到新动作: %s, 等待确认...", newAction));
         }
 
-        // [ADD] 动作稳定确认时间：默认 1600ms；若从目标动作(do/oral)切到 Noise，则延长到 2400ms
-        int actionStableMs = 1600;
+        // [ADD] 动作稳定确认时间：默认 800ms；若从目标动作(do/oral)切到 Noise，则延长到 2400ms
+        int actionStableMs = 800;
         if (isSexAction(currentBluetoothState) && "Noise".equals(newAction)) {
             actionStableMs = 2400;
         }
@@ -1104,7 +1104,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     // 控制发送频率
                     if ((currentTime - lastBluetoothSendTime) >= BLUETOOTH_SEND_INTERVAL) {
                         // 无论蓝牙是否连接，都更新状态和UI
-                        Log.i(TAG, String.format("[蓝牙] [同步分析] ✅ 发送指令: %s (已稳定%dms)",
+                        Log.i(TAG, String.format("[蓝牙] [测试] ✅ 发送指令: %s (已稳定%dms)",
                                 pendingBluetoothState, currentTime - pendingStateStartTime));
 
                         // 更新UI显示的动作（不管蓝牙是否连接）
@@ -1144,7 +1144,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
                 if (levelChanged && gapOk) {
                     int levelToSend = currentLevel;
-                    Log.i(TAG, String.format("[蓝牙] 同动作更新档位：%s -> level=%d", currentBluetoothState, levelToSend));
+                    Log.i(TAG, String.format("[蓝牙] [测试] 同动作更新档位：%s -> level=%d", currentBluetoothState, levelToSend));
 
                     if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
                         BLEManager.globalManager.sendAction(currentBluetoothState, levelToSend);

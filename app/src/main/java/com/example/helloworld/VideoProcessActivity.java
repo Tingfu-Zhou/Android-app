@@ -962,10 +962,10 @@ public class VideoProcessActivity extends AppCompatActivity {
         for (int lvl = 1; lvl <= 10; lvl++) {
             float[] r = LEVEL_RANGES[lvl];
             if (r != null && hz >= r[0] && hz < r[1]) {
-                return Math.min(lvl, 9);
+                return Math.min(lvl, 8);   // 9、10 都折叠到 8
             }
         }
-        return 9; // 超出则钳到最高档
+        return 8;                          // 超出最高档也钳到 8
     }
 
     /**
@@ -1024,12 +1024,12 @@ public class VideoProcessActivity extends AppCompatActivity {
         return finalFreq;
     }
 
-    // [ADD] audioFreq 实际承载的是 loudness level（float），这里做 0..9 钳制
+    // [ADD] audioFreq 实际承载的是 loudness level（float），这里做 0..8 钳制
     private static int clampLevelFromLoudness(final float levelLike) {
         if (Float.isNaN(levelLike)) return 0;
         int lv = Math.round(levelLike);
         if (lv < 0) lv = 0;
-        if (lv > 9) lv = 9;
+        if (lv > 8) lv = 8;
         return lv;
     }
 
@@ -1185,8 +1185,8 @@ public class VideoProcessActivity extends AppCompatActivity {
             Log.d(TAG, String.format("[蓝牙] 检测到新动作: %s, 等待确认...", newAction));
         }
 
-        // [ADD] 动作稳定确认时间：默认 1600ms；若从目标动作(do/oral)切到 Noise，则延长到 2400ms
-        int actionStableMs = 1600;
+        // [ADD] 动作稳定确认时间：默认 800ms；若从目标动作(do/oral)切到 Noise，则延长到 2400ms
+        int actionStableMs = 800;
         if (isSexAction(currentBluetoothState) && "Noise".equals(newAction)) {
             actionStableMs = 2400;
         }
