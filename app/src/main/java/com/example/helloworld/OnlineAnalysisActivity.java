@@ -24,10 +24,6 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-import com.google.mlkit.vision.pose.PoseDetection;
-import com.google.mlkit.vision.pose.PoseDetector;
-import com.google.mlkit.vision.pose.accurate.AccuratePoseDetectorOptions;
-
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -50,7 +46,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     // ======= 修改结束 =======
 
     // 分析相关
-    private InferenceHelper inferenceHelper;
+    private VideoClassifierHelper videoClassifier;
     private AudioInferenceHelper audioHelper;
 
     // 线程控制
@@ -77,17 +73,16 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private final AtomicReference<Long> latestVideoTimestamp = new AtomicReference<>(0L);
     private final AtomicReference<Long> latestAudioTimestamp = new AtomicReference<>(0L);
 
-    // 姿态窗口管理
-    private final ArrayDeque<float[][]> poseWindow = new ArrayDeque<>();
-    private static final int WINDOW_SIZE = 32;
-    private static final int MULTI_STEP = 8;
-    private int framesSinceLastMulti = 0;
-    private static final int BINARY_WINDOW = 8;
-    private final ArrayDeque<float[][]> poseWindow8 = new ArrayDeque<>();
+    // 帧缓存环形缓冲：最近 3 秒、间隔 250ms 采样的 12 帧
+    private final ArrayDeque<Bitmap> frameWindow = new ArrayDeque<>();
+    private static final int FRAME_WINDOW_SIZE = VideoClassifierHelper.NUM_FRAMES;
 
-    // 对每个关键点的 x, y 坐标做归一化处理时使用
-    private static final int TARGET_WIDTH = 720;
-    private static final int TARGET_HEIGHT = 480;
+    // 视频推理步长：每 1000ms 推理一次
+    private long lastVideoInferenceTime = 0;
+    private static final long VIDEO_INFERENCE_INTERVAL = 1000;
+
+    // 视频动作置信度阈值：低于此值判为 unclear（无效输出）
+    private static final float VIDEO_CONF_THRESHOLD = 0.4f;
 
     // 音频缓冲 - 使用统一的PcmCircularBuffer
     private PcmCircularBuffer pcmBuffer;
@@ -126,29 +121,13 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private int lastSentLevel = 0;                  // NEW: 记录上次发送出去的档位
 
     // 主线程融合循环间隔
-    private static final long MAIN_FUSION_INTERVAL = 800;
-    //视频线程间隔
-    private static final long VIDEO_LOOP_INTERVAL_MS = 100;
+    private static final long MAIN_FUSION_INTERVAL = 1000;
+    // 视频线程间隔（帧缓存间隔 250ms）
+    private static final long VIDEO_LOOP_INTERVAL_MS = 250;
     //音频线程间隔
     private static final long AUDIO_LOOP_TICK_MS = 1000;
 
-    //音频节奏
-    // private final AudioRhythmEstimator rhythmEstimator = new AudioRhythmEstimator(16000);
-
-    // 视频节律器（新版：基于 ROI 块运动 + 泄漏积分 + 自相关主频）
-    private final VideoMotionWaveEstimator videoMotionWaveEstimator = new VideoMotionWaveEstimator();
-    // 音频节奏
-    /*
-    private final java.util.concurrent.atomic.AtomicReference<Float> latestAudioRhythmHz =
-            new java.util.concurrent.atomic.AtomicReference<>(Float.NaN);
-    private final java.util.concurrent.atomic.AtomicReference<Float> latestAudioRhythmConf =
-            new java.util.concurrent.atomic.AtomicReference<>(0f);
-    private final java.util.concurrent.atomic.AtomicLong latestAudioRhythmTsMs =
-            new java.util.concurrent.atomic.AtomicLong(0L);
-    private final java.util.concurrent.atomic.AtomicBoolean latestAudioRhythmValid =
-            new java.util.concurrent.atomic.AtomicBoolean(false);
-    */
-    // [12.30] Loudness 档位估计器（替代原 AudioRhythmEstimator）
+    // [12.30] Loudness 档位估计器（音频节律输出）
     private final AudioLoudnessLevelEstimator loudnessEstimator = new AudioLoudnessLevelEstimator(16000);
 
     // [12.30] 音频“响度档位”结果（线程安全共享）
@@ -160,15 +139,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             new java.util.concurrent.atomic.AtomicLong(0L);
     private final java.util.concurrent.atomic.AtomicBoolean latestAudioLoudValid =
             new java.util.concurrent.atomic.AtomicBoolean(false);
-
-
-    // 视频节律, 视频侧“频率缓存”（先不进主融合，只做存储）
-    private final java.util.concurrent.atomic.AtomicReference<Float> latestVideoFreqHz =
-            new java.util.concurrent.atomic.AtomicReference<>(Float.NaN);
-    private final java.util.concurrent.atomic.AtomicReference<Float> latestVideoFreqConf =
-            new java.util.concurrent.atomic.AtomicReference<>(0f);
-    private final java.util.concurrent.atomic.AtomicLong latestVideoFreqTsMs =
-            new java.util.concurrent.atomic.AtomicLong(0);
 
 
 
@@ -205,15 +175,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         // ======= 修改结束 =======
 
         // 初始化推理助手
-        inferenceHelper = new InferenceHelper(this);
+        videoClassifier = new VideoClassifierHelper(this);
         audioHelper = new AudioInferenceHelper(this);
-
-        // 初始化ML Kit
-        AccuratePoseDetectorOptions options = new AccuratePoseDetectorOptions.Builder()
-                .setDetectorMode(AccuratePoseDetectorOptions.SINGLE_IMAGE_MODE)
-                .build();
-        PoseDetector detector = PoseDetection.getClient(options);
-        inferenceHelper.setPoseDetector(detector);
 
         // 初始化音频缓冲 - 使用在线模式
         pcmBuffer = new PcmCircularBuffer(16000, 10, true);
@@ -444,7 +407,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 }
 
                 if (isAnalysisPaused.get()) {
-                    videoHandler.postDelayed(this, 100);
+                    videoHandler.postDelayed(this, VIDEO_LOOP_INTERVAL_MS);
                     return;
                 }
 
@@ -457,19 +420,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                         latestFrame = null;
                     }
 
-                    if (frame != null && !frame.isRecycled()) {  // ======= 修改：检查bitmap是否已回收 =======
-                        // ML Kit姿态检测（异步）
-                        long tMMPoseStart = System.currentTimeMillis();
-                        // capture frame 供 processVideoFrame 透传给视频运动波形估计器
-                        final Bitmap capturedFrame = frame;
-                        inferenceHelper.runPoseModelViaMLKit(frame, keypointsRaw -> {
-                            long tMMPoseEnd = System.currentTimeMillis();
-                            Log.d(TAG, "[计时] MLKit 关键点检测耗时: " + (tMMPoseEnd - tMMPoseStart) + " ms");
-                            processVideoFrame(capturedFrame, keypointsRaw);
-                        });
-
-                        // ======= 修改：不要立即回收，让ML Kit处理完成后自动管理 =======
-                        // frame.recycle();  // 移除这行
+                    if (frame != null && !frame.isRecycled()) {
+                        cacheFrameAndInfer(frame);
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "[视频线程] 异常：", e);
@@ -484,133 +436,85 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         videoHandler.post(videoRunnable);
     }
 
-    private void processVideoFrame(Bitmap frame, float[][][][] keypointsRaw) {
+    /**
+     * 缓存一帧到滑动窗口；窗口满 12 帧且距上次推理 ≥ 1000ms 时执行一次推理。
+     */
+    private void cacheFrameAndInfer(Bitmap frame) {
         synchronized (videoLock) {
-            long framePtsMs = System.currentTimeMillis();
+            // 缩放到模型输入尺寸后缓存
+            Bitmap scaled = Bitmap.createScaledBitmap(
+                    frame, VideoClassifierHelper.INPUT_SIZE, VideoClassifierHelper.INPUT_SIZE, true);
+            frameWindow.add(scaled);
+            while (frameWindow.size() > FRAME_WINDOW_SIZE) {
+                frameWindow.poll();
+            }
 
-            if (keypointsRaw == null || keypointsRaw.length == 0) {
-                Log.w(TAG, "[视频线程] ML Kit 返回为null");
-                // === 镜头切换 / 无人体：通知视频运动波形估计器 ===
-                videoMotionWaveEstimator.pushFrame(framePtsMs, null, null);
-                latestVideoFreqHz.set(Float.NaN);
-                latestVideoFreqConf.set(0f);
-                latestVideoFreqTsMs.set(0);
+            // 滑动窗口未满 3 秒，暂不推理
+            if (frameWindow.size() < FRAME_WINDOW_SIZE) {
+                Log.d(TAG, "[视频线程] 帧窗口预热中 (" + frameWindow.size()
+                        + "/" + FRAME_WINDOW_SIZE + ")");
                 return;
             }
 
-            float[][] keypoints = keypointsRaw[0][0];
-
-            // 归一化关键点
-            // [MOD] 归一化关键点：对齐 Windows 的 preNormalize2D 前置假设（先到 [0,1]）
-            // 注意：keypoints[i][2] (conf) 保持不变
-            for (int i = 0; i < keypoints.length; i++) {
-                keypoints[i][0] = keypoints[i][0] / (float) TARGET_WIDTH;
-                keypoints[i][1] = keypoints[i][1] / (float) TARGET_HEIGHT;
+            // 推理步长 1000ms
+            long now = System.currentTimeMillis();
+            if (now - lastVideoInferenceTime < VIDEO_INFERENCE_INTERVAL) {
+                return;
             }
+            lastVideoInferenceTime = now;
 
+            Bitmap[] frames = frameWindow.toArray(new Bitmap[0]);
+            long tInferStart = System.currentTimeMillis();
+            VideoClassifierHelper.Result result = videoClassifier.predict(frames);
+            Log.d(TAG, "[计时] MobileNetV3Small 推理耗时: "
+                    + (System.currentTimeMillis() - tInferStart) + " ms");
 
-            // === 将原始帧 + 归一化关键点推入“视频运动波形估计器” ===
-            // 关键点仅用于 ROI 定位；节律来自 ROI 内块运动 → 泄漏积分 → 自相关。
-            videoMotionWaveEstimator.pushFrame(framePtsMs, frame, keypoints);
-            VideoWaveResult vwr = videoMotionWaveEstimator.getLatestResult();
-            if (vwr != null && vwr.valid) {
-                latestVideoFreqHz.set(vwr.freqHz);
-                latestVideoFreqConf.set(vwr.confidence);
-                latestVideoFreqTsMs.set(vwr.timestampMs);
-                Log.d(TAG, String.format(
-                        "[频率测试] [在线模式] 视频运动波形 - f=%.2fHz, conf=%.2f, per=%.2f, mE=%.3f, pos01=%.2f, locked=%s",
-                        vwr.freqHz, vwr.confidence, vwr.periodicity, vwr.motionEnergy,
-                        vwr.position01, String.valueOf(vwr.locked)));
-                Log.d(TAG, "[VideoWave] " + vwr.debugInfo);
-            } else {
-                latestVideoFreqHz.set(Float.NaN);
-                latestVideoFreqConf.set(0f);
-                latestVideoFreqTsMs.set(framePtsMs);
-                if (vwr != null) Log.d(TAG, "[VideoWave] " + vwr.debugInfo);
-            }
-
-
-
-            // 8帧二分类窗口
-            poseWindow8.add(keypoints);
-            if (poseWindow8.size() > BINARY_WINDOW) poseWindow8.poll();
-
-            // 32帧多分类
-            poseWindow.add(keypoints);
-            if (poseWindow.size() > WINDOW_SIZE) poseWindow.poll();
-            framesSinceLastMulti++;
-
-            if (poseWindow.size() == WINDOW_SIZE && framesSinceLastMulti >= MULTI_STEP) {
-                framesSinceLastMulti = 0;
-
-                float[][][] input = convertPoseWindowToInput(poseWindow);
-                // [MOD] 对齐 Windows：窗口级 bbox 归一化（MMAction2 PreNormalize2D）
-                input = preNormalize2D(input);
-                long tStgcnStart = System.currentTimeMillis();
-                float[] scores = inferenceHelper.runStgcnModel(input);
-                long tStgcnEnd = System.currentTimeMillis();
-                Log.d(TAG, "[计时] ST-GCN++ 推理耗时: " + (tStgcnEnd - tStgcnStart) + " ms");
-
-                if (scores != null) {
-                    float[] probs = softmax(scores);
-
-                    float probOral = probs[0] + probs[1];
-                    float probDoslow = probs[2] + probs[3] + probs[4] + probs[5];
-                    float probNoiseStand = probs[6];
-                    float probNoiseSit = probs[7];
-
-                    float TargetProb = probOral + probDoslow;
-                    float NoiseProb = probNoiseStand + probNoiseSit;
-
-                    float NOISE_RATIO_THRESHOLD = 1.5f;
-
-                    String actionClass;
-                    float bestScore;
-
-                    if (NoiseProb > TargetProb * NOISE_RATIO_THRESHOLD) {
-                        actionClass = "Noise";
-                        bestScore = 0.0f;
-                    } else {
-                        if (probOral > probDoslow) {
-                            actionClass = "oral";
-                            bestScore = probOral;
-                        } else {
-                            actionClass = "do";
-                            bestScore = probDoslow;
-                        }
-                    }
-
-                    float threshold = 0.0f;
-                    if (bestScore < threshold) {
-                        actionClass = "Noise";
-                        bestScore = 1.0f;
-                        Log.d(TAG, String.format(
-                                "[测试] 视频分析判定为 Noise (最大概率=%.3f < 阈值)",
-                                bestScore));
-                    } else {
-                        Log.d(TAG, String.format("[测试] 视频识别结果: %s (p=%.2f)",
-                                actionClass, bestScore));
-                        // 输出详细的概率分布
-                        Log.d(TAG, String.format("[视频线程] 概率分布: oral=%.3f, do=%.3f, noise_stand=%.3f, noise_sit=%.3f",
-                                probOral, probDoslow, probNoiseStand, probNoiseSit));
-                    }
-
-                    latestVideoAction.set(actionClass);
-                    latestVideoConfidence.set(bestScore);
-                    latestVideoTimestamp.set(System.currentTimeMillis());
-
-                    final String finalActionClass = actionClass;
-                    final float finalBestScore = bestScore;
-
-                    // 通过Service更新悬浮窗UI
-                    // 更新悬浮窗显示
-                    String displayText = String.format("V: %s (%.2f)", finalActionClass, finalBestScore);
-                    if (OnlineAnalysisService.getInstance() != null) {
-                        OnlineAnalysisService.getInstance().updateFloatingVideoAction(displayText);
-                    }
-                }
-            }
+            applyVideoResult(result);
         }
+    }
+
+    /**
+     * 将三分类结果映射为视频动作并写入共享结果。
+     * 0 normal_plot -> "Noise"（不转）；1 oral / 2 sex -> "do"（转）；
+     * 置信度低于阈值 -> unclear -> ""（置信度 0）。
+     */
+    private void applyVideoResult(VideoClassifierHelper.Result result) {
+        String actionClass;
+        float confidence;
+
+        if (result == null || result.index < 0) {
+            actionClass = "";
+            confidence = 0f;
+            Log.w(TAG, "[视频线程] 推理结果无效，判为 unclear");
+        } else if (result.confidence < VIDEO_CONF_THRESHOLD) {
+            actionClass = "";
+            confidence = 0f;
+            Log.d(TAG, String.format("[视频线程] 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                    result.confidence, VIDEO_CONF_THRESHOLD));
+        } else if (result.index == 0) {
+            // normal_plot -> 不转
+            actionClass = "Noise";
+            confidence = result.confidence;
+        } else {
+            // oral / sex -> 转
+            actionClass = "do";
+            confidence = result.confidence;
+        }
+
+        // 原子更新结果
+        latestVideoAction.set(actionClass);
+        latestVideoConfidence.set(confidence);
+        latestVideoTimestamp.set(System.currentTimeMillis());
+
+        // 通过 Service 更新悬浮窗 UI
+        String displayText = actionClass.isEmpty()
+                ? "V: unclear"
+                : String.format("V: %s (%.2f)", actionClass, confidence);
+        if (OnlineAnalysisService.getInstance() != null) {
+            OnlineAnalysisService.getInstance().updateFloatingVideoAction(displayText);
+        }
+        Log.d(TAG, "[视频线程] " + displayText
+                + (result != null ? " probs=" + java.util.Arrays.toString(result.probs) : ""));
     }
 
     private long lastAudioInferenceTime = 0;
@@ -638,25 +542,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                         // 读取2秒音频数据 - 使用统一的接口
                         float[] audioSegment = pcmBuffer.getLatestData(32000);
 
-                        /*
-                        // **************音频频率分析**************
-                        float[] last1s = pcmBuffer.getLatestData(16000); // 1秒 @16 kHz (根据您的API调整)
-                        if (last1s != null && last1s.length > 0) {
-                            rhythmEstimator.push(last1s); // 将~1秒追加到4秒内部缓冲区
-                        }
-                        // 仅在预热时(累积>=4秒)且**每~1秒节拍一次**时估计。
-                        if (rhythmEstimator.isWarm()) {
-                            AudioRhythmEstimator.Result rr = rhythmEstimator.estimate(System.currentTimeMillis());
-                            // 仅存储(根据您的要求，不在此处融合)
-                            Log.d(TAG, String.format("[频率测试] 音频节奏 [在线模式] - 有效:%s, 频率:%.2f Hz, 置信度:%.2f",
-                                    rr.valid, rr.frequencyHz, rr.confidence));
-                            latestAudioRhythmHz.set(rr.frequencyHz);
-                            latestAudioRhythmConf.set(rr.confidence);
-                            latestAudioRhythmTsMs.set(rr.timestampMs);
-                            latestAudioRhythmValid.set(rr.valid);
-                        }
-                        //******************************************
-                        */
                         // **************[MOD] 音频 Loudness → 档位分析（替代频率估计）**************
                         float[] last1s = pcmBuffer.getLatestData(8000); // 0.5秒, 16 kHz/s
                         if (last1s != null && last1s.length > 0) {
@@ -754,36 +639,17 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 long audioTime = latestAudioTimestamp.get();
 
                 // 音频节奏
-                /*
-                boolean audioFreqValid = latestAudioRhythmValid.get();
-                float audioFreq = latestAudioRhythmHz.get();
-                float audioFreqConf = latestAudioRhythmConf.get();
-                long audioFreqTs = latestAudioRhythmTsMs.get();
-                */
                 boolean audioFreqValid = latestAudioLoudValid.get();
-                float audioFreq = (float) latestAudioLoudLevel.get();    // [MOD] 用 level 伪装成“freq输入”
+                float audioFreq = (float) latestAudioLoudLevel.get();    // 用 level 作为 freq 输入
                 float audioFreqConf = latestAudioLoudConf.get();
                 long audioFreqTs = latestAudioLoudTsMs.get();
-
-                // 视频节奏
-                float videoFreq = latestVideoFreqHz.get();
-                float videoFreqConf = latestVideoFreqConf.get();
-                long  videoFreqTs = latestVideoFreqTsMs.get();
 
                 long currentTime = System.currentTimeMillis();
                 long videoAge = videoTime > 0 ? currentTime - videoTime : Long.MAX_VALUE;
                 long audioAge = audioTime > 0 ? currentTime - audioTime : Long.MAX_VALUE;
-                long videoFreqAge = videoFreqTs > 0 ? currentTime - videoFreqTs : Long.MAX_VALUE;
                 long audioFreqAge = audioFreqTs > 0 ? currentTime - audioFreqTs : Long.MAX_VALUE;
 
                 final long MAX_AGE = 2000;
-
-                // 如果视频节奏结果过期，清空它
-                if (videoFreqAge > MAX_AGE) {
-                    videoFreq = Float.NaN;
-                    videoFreqConf = 0f;
-                    Log.d(TAG, "[融合] 视频节奏结果过期（" + videoFreqAge + "ms），已忽略");
-                }
 
                 // 如果音频频节奏结果过期，清空它
                 if (audioFreqAge > MAX_AGE || !audioFreqValid) {
@@ -821,7 +687,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
-                int finalFreq = computeFinalFreq(audioFreq, audioFreqConf, videoFreq, videoFreqConf);
+                int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
 
                 // [修改] 检查BLE暂停状态，如果未暂停才发送
                 if (!finalAction.isEmpty()) {
@@ -856,43 +722,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         mainHandler.post(fusionRunnable);
     }
 
-    /* 频率->10档映射占位表（index 1..10：对应档位1~10；0为停止）
-    “周期性事件”指的是：一次完整的抽插周期（前推 + 后拉，或一次节律峰到下一次节律峰）
-    1 Hz = 1 次/秒 的完整抽插周期
-     * 频率 -> 10 档映射（真实机械频率）
-     * 说明：
-     * - 1 次抽插 = 马达 3 转
-     * - freq = RPM / 180
-     * - 当前硬件可达范围 ≈ 1.0 – 1.8 Hz
-     */
-    private static final float[][] LEVEL_RANGES = new float[][]{
-            null,                // 0 占位（停止）
-
-            {0.95f, 1.12f},      // 档1 ≈ 190 RPM (1.06 Hz)
-            {1.12f, 1.27f},      // 档2 ≈ 220 RPM (1.22 Hz)
-            {1.27f, 1.40f},      // 档3 ≈ 240 RPM (1.33 Hz)
-            {1.40f, 1.53f},      // 档4 ≈ 270 RPM (1.50 Hz)
-            {1.53f, 1.58f},      // 档5 ≈ 280 RPM (1.56 Hz)
-            {1.58f, 1.63f},      // 档6 ≈ 290 RPM (1.61 Hz)
-            {1.63f, 1.66f},      // 档7 ≈ 295 RPM (1.64 Hz)
-            {1.66f, 1.70f},      // 档8 ≈ 300 RPM (1.67 Hz)
-            {1.70f, 1.75f},      // 档9 ≈ 310 RPM (1.72 Hz)
-            {1.75f, 1.85f}       // 档10 ≈ 320 RPM (1.78 Hz)
-    };
-
-    // === NEW: 把 Hz 映射为 0...9 档（0为停止）——等工厂给确定值后替换 LEVEL_RANGES 即可
-    private static int mapFreqToLevel(final float hz) {
-        if (Float.isNaN(hz) || hz <= 0f) return 0;
-        for (int lvl = 1; lvl <= 10; lvl++) {
-            float[] r = LEVEL_RANGES[lvl];
-            if (r != null && hz >= r[0] && hz < r[1]) {
-                return Math.min(lvl, 8);   // 9、10 都折叠到 8
-            }
-        }
-        return 8;                          // 超出最高档也钳到 8
-    }
-
-    // [ADD] audioFreq 实际承载的是 loudness level（float），这里做 0..8 钳制
+    // audioFreq 实际承载的是 loudness level（float），这里做 0..8 钳制
     private static int clampLevelFromLoudness(final float levelLike) {
         if (Float.isNaN(levelLike)) return 0;
         int lv = Math.round(levelLike);
@@ -903,20 +733,13 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
 
     /**
-     * 12.11 计算最终节律档位（0..10）。
+     * 计算最终节律档位（0..8）。
      *
-     * <p>当前策略：仅使用音频节律映射为档位，并做“置信度阈值 + 方向性门控（涨档更严格，降档更宽松）”。
-     * 预留 videoFreq/videoFreqConf 参数，便于未来扩展为音视频融合节律。</p>
+     * <p>策略：使用音频响度档位，并做“置信度阈值 + 方向性门控（涨档更严格，降档更宽松）”。</p>
      */
-    private int computeFinalFreq(float audioFreq, float audioFreqConf, float videoFreq, float videoFreqConf) {
-        // 临时采用音频节律作为最终节律
-        // int finalFreq = mapFreqToLevel(audioFreq);
-        int finalFreq = clampLevelFromLoudness(audioFreq); // [MOD] audioFreq 实际是 level(float)
+    private int computeFinalFreq(float audioFreq, float audioFreqConf) {
+        int finalFreq = clampLevelFromLoudness(audioFreq); // audioFreq 实际是 loudness level(float)
         Log.d(TAG, "[音频响度] 得到音频档位: " + audioFreq + " 置信度: " + audioFreqConf + " 档位: " + finalFreq);
-
-        int videoFre = mapFreqToLevel(videoFreq);
-        Log.d(TAG, "[视频节律] 得到视频节律: " + videoFreq + " 置信度: " + videoFreqConf + " 档位: " + videoFre);
-        // Log.d(TAG, "[音频节律] 得到音频节律: " + audioFreq + " 置信度: " + audioFreqConf + " 档位: " + finalFreq);
 
         // === 12.12: 方向性置信度门控（涨档更严格，降档更宽松） ===
         {
@@ -1185,77 +1008,11 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         Log.i(TAG, "恢复分析");
     }
 
-    // 工具方法
-    private float[][][] convertPoseWindowToInput(ArrayDeque<float[][]> window) {
-        int size = window.size();
-        float[][][] input = new float[size][17][3];
-        int idx = 0;
-        for (float[][] kpts : window) {
-            input[idx++] = kpts;
-        }
-        return input;
-    }
-
-    // =========================
-    // [ADD] 对齐 Windows(ActionUtils.preNormalize2D)：窗口级 bbox 中心化 + 等比缩放
-    // 输入: float[T][V][3]  (x,y,conf) 其中 conf<=0 视为无效点
-    // 输出: 同维度
-    // =========================
-    private static float[][][] preNormalize2D(float[][][] window) {
-        float xMin = Float.MAX_VALUE, yMin = Float.MAX_VALUE;
-        float xMax = Float.MIN_VALUE, yMax = Float.MIN_VALUE;
-
-        for (float[][] frame : window) {
-            for (float[] kp : frame) {
-                if (kp[2] <= 0f) continue;      // 仅统计有效关键点
-                xMin = Math.min(xMin, kp[0]);
-                yMin = Math.min(yMin, kp[1]);
-                xMax = Math.max(xMax, kp[0]);
-                yMax = Math.max(yMax, kp[1]);
-            }
-        }
-
-        if (xMax < xMin) { // 全无有效点
-            xMin = 0f; yMin = 0f; xMax = 1f; yMax = 1f;
-        }
-
-        float cx = 0.5f * (xMin + xMax);
-        float cy = 0.5f * (yMin + yMax);
-        float scale = Math.max(xMax - xMin, yMax - yMin);
-        if (scale < 1e-6f) scale = 1e-6f;
-
-        float[][][] out = new float[window.length][window[0].length][3];
-        for (int t = 0; t < window.length; t++) {
-            for (int v = 0; v < window[0].length; v++) {
-                out[t][v][0] = (window[t][v][0] - cx) / scale;
-                out[t][v][1] = (window[t][v][1] - cy) / scale;
-                out[t][v][2] =  window[t][v][2];
-            }
-        }
-        return out;
-    }
-
-
-    private float[] softmax(float[] logits) {
-        float maxLogit = Float.NEGATIVE_INFINITY;
-        for (float l : logits) maxLogit = Math.max(maxLogit, l);
-        float sum = 0f;
-        float[] expVals = new float[logits.length];
-        for (int i = 0; i < logits.length; i++) {
-            expVals[i] = (float) Math.exp(logits[i] - maxLogit);
-            sum += expVals[i];
-        }
-        for (int i = 0; i < logits.length; i++) expVals[i] /= sum;
-        return expVals;
-    }
-
-    // 在 OnlineAnalysisActivity 中添加
     private void resetAnalysisBuffers() {
-        // 清空 pose 和 pcm 缓冲，避免读取到“前一个时间点”的旧数据
+        // 清空帧缓存和 pcm 缓冲，避免读取到“前一个时间点”的旧数据
         synchronized (videoLock) {
-            poseWindow.clear();
-            poseWindow8.clear();
-            framesSinceLastMulti = 0;
+            frameWindow.clear();
+            lastVideoInferenceTime = 0;
         }
 
         synchronized (audioLock) {
@@ -1279,14 +1036,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         pendingLevel = null;
         pendingLevelSinceMs = 0;
 
-        //清空音频频率控制
-        /*
-        rhythmEstimator.reset();
-        latestAudioRhythmHz.set(Float.NaN);
-        latestAudioRhythmConf.set(0f);
-        latestAudioRhythmTsMs.set(0);
-        latestAudioRhythmValid.set(false);
-        */
         // [12.20] reset loudness estimator
         loudnessEstimator.reset();
         // [12.30] 清空 loudness 输出
@@ -1294,12 +1043,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         latestAudioLoudConf.set(0f);
         latestAudioLoudTsMs.set(0L);
         latestAudioLoudValid.set(false);
-
-        //清空视频频率控制
-        videoMotionWaveEstimator.reset();
-        latestVideoFreqHz.set(Float.NaN);
-        latestVideoFreqConf.set(0f);
-        latestVideoFreqTsMs.set(0);
 
         Log.d(TAG, "[在线分析] [同步分析] 已重置所有分析缓冲");
     }
@@ -1325,8 +1068,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             mainHandler.removeCallbacksAndMessages(null);
         }
 
-        if (inferenceHelper != null) {
-            inferenceHelper.close();
+        if (videoClassifier != null) {
+            videoClassifier.close();
         }
 
         if (audioHelper != null) {

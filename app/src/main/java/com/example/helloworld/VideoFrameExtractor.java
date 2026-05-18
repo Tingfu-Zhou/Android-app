@@ -33,9 +33,9 @@ public class VideoFrameExtractor {
     private int videoWidth;
     private int videoHeight;
     private boolean isInitialized = false;
-    // ✅ 新增：设置输出帧分辨率（ML Kit 推荐最低分辨率：480*350）
-    private static final int TARGET_WIDTH = 720;
-    private static final int TARGET_HEIGHT = 480;
+    // 设置输出帧分辨率：MobileNetV3Small 视频分类模型输入为 160x160
+    private static final int TARGET_WIDTH = 160;
+    private static final int TARGET_HEIGHT = 160;
 
     public VideoFrameExtractor(Context context, Uri videoUri) throws IOException {
         extractor = new MediaExtractor();

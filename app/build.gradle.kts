@@ -38,18 +38,12 @@ dependencies {
     implementation(libs.activity)
     implementation(libs.constraintlayout)
 
-    // ONNX
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.16.1")
     // AndroidX UI 组件
     implementation("androidx.appcompat:appcompat:1.3.1")
     implementation("androidx.constraintlayout:constraintlayout:2.1.1")
     implementation("com.google.android.material:material:1.4.0")
     // TensorFlow Lite 核心库
     implementation("org.tensorflow:tensorflow-lite:2.13.0")
-    // ML Kit pose detection
-    implementation("com.google.mlkit:pose-detection:18.0.0-beta5")
-    implementation("com.google.mlkit:pose-detection-accurate:18.0.0-beta5")
-    implementation("com.google.android.gms:play-services-tasks:18.0.0")
     // 如果需要更好的权限管理，可以添加（可选）：
     implementation("pub.devrel:easypermissions:3.0.0")
     // 单元测试 & Android 测试
