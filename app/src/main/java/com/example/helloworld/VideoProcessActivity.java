@@ -722,7 +722,7 @@ public class VideoProcessActivity extends AppCompatActivity {
      */
     private int computeFinalFreq(float audioFreq, float audioFreqConf) {
         int finalFreq = clampLevelFromLoudness(audioFreq); // audioFreq 实际是 loudness level(float)
-        Log.d(TAG, "[音频响度] 得到音频档位: " + audioFreq + " 置信度: " + audioFreqConf + " 档位: " + finalFreq);
+        Log.d(TAG, "[音频节律] 得到音频档位: " + audioFreq + " 置信度: " + audioFreqConf + " 档位: " + finalFreq);
 
         // === 12.12: 方向性置信度门控（涨档更严格，降档更宽松） ===
         {
