@@ -433,13 +433,13 @@ public class VideoProcessActivity extends AppCompatActivity {
         if (result == null || result.index < 0) {
             actionClass = "";
             confidence = 0f;
-            Log.w(TAG, "[视频线程] 推理结果无效，判为 unclear");
+            Log.w(TAG, "[同步分析] [视频线程] 推理结果无效，判为 unclear");
         } else if (result.index == 0) {
             // normal_plot：置信度阈值 0.5
             if (result.confidence < VIDEO_THRESHOLD_NORMAL) {
                 actionClass = "";
                 confidence = 0f;
-                Log.d(TAG, String.format("[视频线程] normal_plot 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                Log.d(TAG, String.format("[同步分析] [视频线程] normal_plot 置信度 %.2f < 阈值 %.2f，判为 unclear",
                         result.confidence, VIDEO_THRESHOLD_NORMAL));
             } else {
                 actionClass = "Noise";   // 不转
@@ -450,7 +450,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             if (result.confidence < VIDEO_THRESHOLD_ACTION) {
                 actionClass = "";
                 confidence = 0f;
-                Log.d(TAG, String.format("[视频线程] oral/sex 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                Log.d(TAG, String.format("[同步分析] [视频线程] oral/sex 置信度 %.2f < 阈值 %.2f，判为 unclear",
                         result.confidence, VIDEO_THRESHOLD_ACTION));
             } else {
                 actionClass = "do";   // 转
@@ -467,7 +467,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 ? "V: unclear"
                 : String.format("V: %s (p=%.2f)", actionClass, confidence);
         mainHandler.post(() -> tvVideoAction.setText(displayText));
-        Log.d(TAG, "[视频线程] " + displayText
+        Log.d(TAG, "[同步分析] [视频线程] " + displayText
                 + (result != null ? " probs=" + Arrays.toString(result.probs) : ""));
     }
 
@@ -536,13 +536,13 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 if (index < 0) {
                                     action = "";
                                     confidence = 0f;
-                                    Log.w(TAG, "[音频线程] 推理结果无效，判为 unclear");
+                                    Log.w(TAG, "[音频线程] [同步分析] 推理结果无效，判为 unclear");
                                 } else if (index == 2) {
                                     // noise：置信度阈值 0.6
                                     if (confidence < AUDIO_THRESHOLD_NOISE) {
                                         action = "";
                                         confidence = 0f;
-                                        Log.d(TAG, String.format("[音频线程] noise 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                                        Log.d(TAG, String.format("[音频线程] [同步分析] noise 置信度 %.2f < 阈值 %.2f，判为 unclear",
                                                 result.confidence, AUDIO_THRESHOLD_NOISE));
                                     } else {
                                         action = "Noise";   // 不转
@@ -552,7 +552,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                                     if (confidence < AUDIO_THRESHOLD_ACTION) {
                                         action = "";
                                         confidence = 0f;
-                                        Log.d(TAG, String.format("[音频线程] sex/oral 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                                        Log.d(TAG, String.format("[音频线程] [同步分析] sex/oral 置信度 %.2f < 阈值 %.2f，判为 unclear",
                                                 result.confidence, AUDIO_THRESHOLD_ACTION));
                                     } else {
                                         action = "do";   // 转
@@ -569,7 +569,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                                         ? "A: unclear"
                                         : String.format("A: %s (p=%.2f)", action, confidence);
                                 mainHandler.post(() -> tvAudioAction.setText(displayText));
-                                Log.d(TAG, "[音频线程] " + displayText);
+                                Log.d(TAG, "[同步分析] [音频线程] " + displayText);
                                 // 更新上次音频推理时间
                                 lastAudioInferenceTime = currentSystemTime;
                             } else {
@@ -804,7 +804,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                     // 包括Noise在内的所有动作都参与评分
                     String videoKey = record.videoAction;
                     float score = actionScores.getOrDefault(videoKey, 0f);
-                    score += record.videoConfidence * weight * 0.7f; // 视频权重稍低
+                    score += record.videoConfidence * weight * 1.0f; // 视频权重1.0
                     actionScores.put(videoKey, score);
 
                     int count = actionCounts.getOrDefault(videoKey, 0);
@@ -816,7 +816,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                     // 包括Noise在内的所有动作都参与评分
                     String audioKey = record.audioAction;
                     float score = actionScores.getOrDefault(audioKey, 0f);
-                    score += record.audioConfidence * weight * 1.3f; // 音频权重更高
+                    score += record.audioConfidence * weight * 1.0f; // 音频权重1.0
                     actionScores.put(audioKey, score);
 
                     int count = actionCounts.getOrDefault(audioKey, 0);
