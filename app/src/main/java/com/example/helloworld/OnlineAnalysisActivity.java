@@ -895,118 +895,228 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         return "";
     }
 
-    private void updateBluetoothState(String newAction, int finalFreq /* 0..10 */) {
+    // 蓝牙发送状态管理器
+    private void updateBluetoothState(String newAction, int finalFreq /* 0..8 */) {
         long currentTime = System.currentTimeMillis();
 
-        // =====================[ NEW: 档位确认（迟滞 + 短稳 + 最小驻留） ]=====================
-        // 仅在该动作支持“变速”时才处理档位；否则清空待确认
-        boolean supportsLevel = isSexAction(newAction) && currentStateSupportsSpeed();
-        if (supportsLevel) {
-            int latestLevel = finalFreq; // 你已经 map 到 0..10 的整数
+        // =====================[ 档位确认：立即生效版 ]=====================
+        // 只要 newAction 是 do/oral，就允许处理档位。
+        // 不再依赖 currentStateSupportsSpeed()，避免从 Noise -> do 时 currentBluetoothState 还不是 do，导致档位不同步。
+        boolean supportsLevel = isSexAction(newAction);
 
-            // 迟滞：只有越过上下阈时才认为“有变动”的价值
-            if (latestLevel >= upThreshold(currentLevel) || latestLevel <= downThreshold(currentLevel)) {
-                if (pendingLevel == null || !pendingLevel.equals(latestLevel)) {
-                    pendingLevel = latestLevel;
-                    pendingLevelSinceMs = currentTime;
+        if (supportsLevel) {
+            int latestLevel = finalFreq;
+
+            // 安全钳制到 0..8
+            if (latestLevel < 0) latestLevel = 0;
+            if (latestLevel > 8) latestLevel = 8;
+
+            // 迟滞：只有跨过 currentLevel ± 1 才处理
+            boolean worthHandling =
+                    latestLevel >= upThreshold(currentLevel) ||
+                            latestLevel <= downThreshold(currentLevel);
+
+            if (worthHandling) {
+                // 关键修复：
+                // LEVEL_STABLE_MS = 0 时，第一次看到新档位就立即生效，不再等下一轮融合循环。
+                if (LEVEL_STABLE_MS <= 0 &&
+                        (currentTime - currentLevelSinceMs >= LEVEL_MIN_DUR_MS)) {
+
+                    if (latestLevel != currentLevel) {
+                        Log.d(TAG, String.format(
+                                "[档位确认] 立即生效: %d -> %d",
+                                currentLevel, latestLevel
+                        ));
+                    }
+
+                    currentLevel = latestLevel;
+                    currentLevelSinceMs = currentTime;
+                    pendingLevel = null;
+                    pendingLevelSinceMs = 0;
+
                 } else {
-                    long dwell = currentTime - pendingLevelSinceMs;
-                    boolean stableOk = (dwell >= LEVEL_STABLE_MS);                      // CHANGED: 仅用短稳
-                    if (stableOk && (currentTime - currentLevelSinceMs >= LEVEL_MIN_DUR_MS)) {
-                        // 切换“已确认生效”的档位
-                        currentLevel = pendingLevel;
-                        currentLevelSinceMs = currentTime;
-                        // 不清空 pendingLevel 也可以，保持即可
+                    // 如果以后你把 LEVEL_STABLE_MS 改成 >0，则走这个短稳确认逻辑
+                    if (pendingLevel == null || !pendingLevel.equals(latestLevel)) {
+                        pendingLevel = latestLevel;
+                        pendingLevelSinceMs = currentTime;
+
+                        Log.d(TAG, String.format(
+                                "[档位确认] 新 pendingLevel=%d，开始等待稳定",
+                                latestLevel
+                        ));
+
+                    } else {
+                        long dwell = currentTime - pendingLevelSinceMs;
+                        boolean stableOk = dwell >= LEVEL_STABLE_MS;
+                        boolean minDurOk = currentTime - currentLevelSinceMs >= LEVEL_MIN_DUR_MS;
+
+                        if (stableOk && minDurOk) {
+                            if (pendingLevel != currentLevel) {
+                                Log.d(TAG, String.format(
+                                        "[档位确认] pending 生效: %d -> %d, dwell=%dms",
+                                        currentLevel, pendingLevel, dwell
+                                ));
+                            }
+
+                            currentLevel = pendingLevel;
+                            currentLevelSinceMs = currentTime;
+                            pendingLevel = null;
+                            pendingLevelSinceMs = 0;
+                        }
                     }
                 }
             } else {
-                // 回到“无变化”状态，避免无意义计时
+                // 没有跨过迟滞门槛，清空 pending，避免旧 pending 干扰后续判断
                 pendingLevel = null;
+                pendingLevelSinceMs = 0;
             }
         } else {
+            // Noise 或其他不支持变速的动作，不处理档位
             pendingLevel = null;
-            // 可选：若不支持变速，可把 currentLevel 维持在安全档位（例如 0/1）
+            pendingLevelSinceMs = 0;
         }
-        // ====================[ 档位确认结束 ]====================
-        // 如果是新动作
+        // =====================[ 档位确认结束 ]=====================
+
+
+        // =====================[ 动作待确认 ]=====================
         if (!newAction.equals(pendingBluetoothState)) {
             pendingBluetoothState = newAction;
             pendingStateStartTime = currentTime;
             Log.d(TAG, String.format("[蓝牙] 检测到新动作: %s, 等待确认...", newAction));
         }
 
-        // [ADD] 动作稳定确认时间：默认 0ms；若从目标动作(do/oral)切到 Noise，则延长到 1000ms
+        // 动作稳定确认时间：
+        // 默认 0ms；如果从 do/oral 切到 Noise，则延长到 1000ms，避免动作中突然停。
         int actionStableMs = 0;
         if (isSexAction(currentBluetoothState) && "Noise".equals(newAction)) {
             actionStableMs = 1000;
         }
 
-        // [MOD] 使用动态稳定确认时间
-        if (pendingBluetoothState.equals(newAction) &&
-                (currentTime - pendingStateStartTime) >= actionStableMs) {
+        boolean actionStableOk =
+                pendingBluetoothState.equals(newAction) &&
+                        (currentTime - pendingStateStartTime) >= actionStableMs;
 
-            // ===== 情况 A：切换到“不同动作” =====
-            if (!pendingBluetoothState.equals(currentBluetoothState)) {
+        if (!actionStableOk) {
+            Log.d(TAG, String.format(
+                    "[蓝牙] 动作尚未稳定: pending=%s, new=%s, 已稳定=%dms, 需要=%dms",
+                    pendingBluetoothState,
+                    newAction,
+                    currentTime - pendingStateStartTime,
+                    actionStableMs
+            ));
+            return;
+        }
 
-                // 检查当前状态是否已经持续了最小时间
-                if (currentBluetoothState.isEmpty() ||
-                        (currentTime - currentStateStartTime) >= BLUETOOTH_MIN_DURATION) {
 
-                    // 控制发送频率
-                    if ((currentTime - lastBluetoothSendTime) >= BLUETOOTH_SEND_INTERVAL) {
-                        // 无论蓝牙是否连接，都更新状态和UI
-                        Log.i(TAG, String.format("[蓝牙] [测试] ✅ 发送指令: %s (已稳定%dms)",
-                                pendingBluetoothState, currentTime - pendingStateStartTime));
+        // =====================[ 情况 A：动作发生变化 ]=====================
+        if (!pendingBluetoothState.equals(currentBluetoothState)) {
 
-                        // 更新UI显示的动作（不管蓝牙是否连接）
-                        latestBluetoothAction.set(pendingBluetoothState);
+            boolean minDurationOk =
+                    currentBluetoothState.isEmpty() ||
+                            (currentTime - currentStateStartTime) >= BLUETOOTH_MIN_DURATION;
 
-                        // CHANGED: 发送时携带“已确认档位”，而非原始 finalFreq
-                        int levelToSend = supportsLevel ? currentLevel : finalFreq; // NEW/CHANGED
-
-                        // 发送新动作（带档位），通过BLEManager发送动作
-                        if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
-                            BLEManager.globalManager.sendAction(pendingBluetoothState, levelToSend); // CHANGED
-                            Log.i(TAG, "[蓝牙] 已通过BLE发送指令(动作切换/含档位)");
-                            lastSentLevel = levelToSend; // NEW: 记录本次已下发的档位
-                        } else {
-                            Log.w(TAG, "[蓝牙] BLE未连接，仅更新UI显示");
-                        }
-
-                        currentBluetoothState = pendingBluetoothState;
-                        currentStateStartTime = currentTime;
-                        lastBluetoothSendTime = currentTime;
-                    }
-                } else {
-                    // 当前动作还未持续足够时间，继续等待
-                    long remainingTime = BLUETOOTH_MIN_DURATION - (currentTime - currentStateStartTime);
-                    Log.d(TAG, String.format("[蓝牙] 当前动作%s需继续保持%dms",
-                            currentBluetoothState, remainingTime));
-                }
+            if (!minDurationOk) {
+                long remainingTime = BLUETOOTH_MIN_DURATION - (currentTime - currentStateStartTime);
+                Log.d(TAG, String.format(
+                        "[蓝牙] 当前动作 %s 需继续保持 %dms，暂不切换到 %s",
+                        currentBluetoothState,
+                        remainingTime,
+                        pendingBluetoothState
+                ));
+                return;
             }
 
-            // ===== 情况 B：动作未变，但档位已确认变化 → 允许“重复发送同一动作以更新档位” =====
-            // 说明：你的协议没有“单独更新速度”的帧，因此我们复用同一动作命令携带新档位，
-            // 同时依然受 BLUETOOTH_SEND_INTERVAL 节流控制。
-            else { // pendingBluetoothState.equals(currentBluetoothState)
-                // 仅当支持变速、档位确实变化、达到发送节流间隔时才重发
-                boolean levelChanged = supportsLevel && (currentLevel != lastSentLevel);
-                boolean gapOk = (currentTime - lastBluetoothSendTime) >= BLUETOOTH_SEND_INTERVAL;
+            boolean gapOk = (currentTime - lastBluetoothSendTime) >= BLUETOOTH_SEND_INTERVAL;
 
-                if (levelChanged && gapOk) {
-                    int levelToSend = currentLevel;
-                    Log.i(TAG, String.format("[蓝牙] [同步分析] 同动作更新档位：%s -> level=%d", currentBluetoothState, levelToSend));
-
-                    if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
-                        BLEManager.globalManager.sendAction(currentBluetoothState, levelToSend);
-                        Log.i(TAG, "[蓝牙] 已通过BLE发送指令(同动作/更新档位)");
-                        lastSentLevel = levelToSend;
-                        lastBluetoothSendTime = currentTime;
-                    } else {
-                        Log.w(TAG, "[蓝牙] BLE未连接，无法更新档位（同动作）");
-                    }
-                }
+            if (!gapOk) {
+                Log.d(TAG, String.format(
+                        "[蓝牙] 动作切换等待发送间隔: gap=%dms, need=%dms",
+                        currentTime - lastBluetoothSendTime,
+                        BLUETOOTH_SEND_INTERVAL
+                ));
+                return;
             }
+
+            int levelToSend;
+            if (isSexAction(pendingBluetoothState)) {
+                // 动作切换到 do/oral 时，发送已确认的 currentLevel
+                levelToSend = currentLevel;
+            } else {
+                // 切到 Noise 时，档位归 0
+                levelToSend = 0;
+            }
+
+            Log.i(TAG, String.format(
+                    "[蓝牙] [同步分析] ✅ 发送指令: action=%s, level=%d, 已稳定=%dms",
+                    pendingBluetoothState,
+                    levelToSend,
+                    currentTime - pendingStateStartTime
+            ));
+
+            latestBluetoothAction.set(pendingBluetoothState);
+
+            if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
+                BLEManager.globalManager.sendAction(pendingBluetoothState, levelToSend);
+                Log.i(TAG, "[蓝牙] [同步分析] ✅ 已通过BLE发送指令(动作切换/含档位)");
+                Log.d(TAG, "[音频节律] ✅ 发送节律：" + levelToSend);
+            } else {
+                Log.w(TAG, "[蓝牙] BLE未连接，仅更新UI显示");
+            }
+
+            currentBluetoothState = pendingBluetoothState;
+            currentStateStartTime = currentTime;
+            lastBluetoothSendTime = currentTime;
+
+            // 关键同步：
+            // 保证 currentLevel / lastSentLevel / 实际发送档位一致。
+            if (isSexAction(currentBluetoothState)) {
+                currentLevel = levelToSend;
+                currentLevelSinceMs = currentTime;
+                lastSentLevel = levelToSend;
+            } else {
+                lastSentLevel = 0;
+            }
+
+            return;
+        }
+
+
+        // =====================[ 情况 B：动作未变，但档位变化 ]=====================
+        // 动作不变，例如 do -> do，但档位从 8 降到 4。
+        // 这种情况需要重发同一个动作，携带新档位。
+        boolean levelChanged = supportsLevel && (currentLevel != lastSentLevel);
+        boolean gapOk = (currentTime - lastBluetoothSendTime) >= BLUETOOTH_SEND_INTERVAL;
+
+        Log.d(TAG, String.format(
+                "[档位发送判断] action=%s, supportsLevel=%s, currentLevel=%d, lastSentLevel=%d, levelChanged=%s, gapOk=%s, gap=%dms",
+                currentBluetoothState,
+                supportsLevel,
+                currentLevel,
+                lastSentLevel,
+                levelChanged,
+                gapOk,
+                currentTime - lastBluetoothSendTime
+        ));
+
+        if (levelChanged && gapOk) {
+            int levelToSend = currentLevel;
+
+            Log.i(TAG, String.format(
+                    "[蓝牙] 同动作更新档位：%s -> level=%d",
+                    currentBluetoothState,
+                    levelToSend
+            ));
+
+            if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
+                BLEManager.globalManager.sendAction(currentBluetoothState, levelToSend);
+                Log.i(TAG, "[蓝牙] [同步分析] ✅ 已通过BLE发送指令(同动作/更新档位)");
+                Log.d(TAG, "[音频节律] ✅ 发送节律：" + levelToSend);
+            } else {
+                Log.w(TAG, "[蓝牙] BLE未连接，无法更新档位（同动作）");
+            }
+
+            lastSentLevel = levelToSend;
+            lastBluetoothSendTime = currentTime;
         }
     }
 
