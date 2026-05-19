@@ -151,6 +151,11 @@ public class VideoProcessActivity extends AppCompatActivity {
     private static final float VIDEO_THRESHOLD_NORMAL = 0.5f;
     private static final float VIDEO_THRESHOLD_ACTION = 0.75f;
 
+    // 音频动作置信度阈值：低于阈值判为 unclear（无效输出）
+    // sex/oral(转) 用 0.5；noise(不转) 用 0.6
+    private static final float AUDIO_THRESHOLD_ACTION = 0.5f;
+    private static final float AUDIO_THRESHOLD_NOISE = 0.6f;
+
     // 主线程融合循环间隔（毫秒）
     private static final long MAIN_FUSION_INTERVAL = 1000;
     // 视频线程间隔（帧缓存间隔 250ms）
@@ -522,40 +527,49 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 long tAudioInferEnd = System.currentTimeMillis();
                                 Log.d(TAG, "[计时] 🔊 音频推理耗时: " + (tAudioInferEnd - tAudioInferStart) + " ms");
 
-                                String[] audioClasses = {"do", "oral", "Noise"};;
-                                float threshold = 0.0f; // 置信度阈值
-
+                                // 音频模型类别: 0=sex(做爱), 1=oral(口交), 2=noise(杂音)
+                                // sex/oral -> "do"(转); noise -> "Noise"(不转); 低于各自阈值 -> ""(unclear)
                                 int index = result.index;
                                 float confidence = result.confidence;
 
-                                if (index >= 0 && index < audioClasses.length) {
-                                    // 如果最大概率小于阈值，则归为"杂音"类(003)
-                                    if (confidence < threshold) {
-                                        index = audioClasses.length - 1;
-                                        confidence = 1.0f; // 可选：视为"完全属于杂音"
-                                        Log.d(TAG, "[同步分析] 音频分析最大概率小于阈值，视为噪音");
+                                String action;
+                                if (index < 0) {
+                                    action = "";
+                                    confidence = 0f;
+                                    Log.w(TAG, "[音频线程] 推理结果无效，判为 unclear");
+                                } else if (index == 2) {
+                                    // noise：置信度阈值 0.6
+                                    if (confidence < AUDIO_THRESHOLD_NOISE) {
+                                        action = "";
+                                        confidence = 0f;
+                                        Log.d(TAG, String.format("[音频线程] noise 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                                                result.confidence, AUDIO_THRESHOLD_NOISE));
+                                    } else {
+                                        action = "Noise";   // 不转
                                     }
-
-                                    String action = audioClasses[index];
-                                    // 这里本质是比例阈值判定，噪声需要比目标类高50%才被认定，如果识别为 Noise 但置信度较低，则判定为 do
-                                    if ("Noise".equals(action) && confidence < 0.6f) {
-                                        action = "do";
-                                        confidence = 1.0f - confidence;
-                                        Log.d(TAG, "[同步分析] Noise置信度过低(" + confidence + ")，转换为 do，新置信度=" + confidence);
+                                } else {
+                                    // sex / oral：置信度阈值 0.5
+                                    if (confidence < AUDIO_THRESHOLD_ACTION) {
+                                        action = "";
+                                        confidence = 0f;
+                                        Log.d(TAG, String.format("[音频线程] sex/oral 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                                                result.confidence, AUDIO_THRESHOLD_ACTION));
+                                    } else {
+                                        action = "do";   // 转
                                     }
-                                    Log.d(TAG, String.format("[同步分析] 音频动作识别结果: %s (p=%.2f)", action, confidence));
-
-                                    // 原子更新结果
-                                    latestAudioAction.set(action);
-                                    latestAudioConfidence.set(confidence);
-                                    latestAudioTimestamp.set(System.currentTimeMillis());
-
-                                    // UI更新
-                                    final String displayText = String.format("A: %s (p=%.2f)", action, confidence);
-                                    mainHandler.post(() -> tvAudioAction.setText(displayText));
-
-                                    Log.d(TAG, "[音频线程] " + displayText);
                                 }
+
+                                // 原子更新结果
+                                latestAudioAction.set(action);
+                                latestAudioConfidence.set(confidence);
+                                latestAudioTimestamp.set(System.currentTimeMillis());
+
+                                // UI更新
+                                final String displayText = action.isEmpty()
+                                        ? "A: unclear"
+                                        : String.format("A: %s (p=%.2f)", action, confidence);
+                                mainHandler.post(() -> tvAudioAction.setText(displayText));
+                                Log.d(TAG, "[音频线程] " + displayText);
                                 // 更新上次音频推理时间
                                 lastAudioInferenceTime = currentSystemTime;
                             } else {
