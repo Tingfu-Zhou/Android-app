@@ -804,7 +804,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                     // 包括Noise在内的所有动作都参与评分
                     String videoKey = record.videoAction;
                     float score = actionScores.getOrDefault(videoKey, 0f);
-                    score += record.videoConfidence * weight * 1.0f; // 视频权重1.0
+                    score += record.videoConfidence * weight * 0.8f; // 视频权重0.8
                     actionScores.put(videoKey, score);
 
                     int count = actionCounts.getOrDefault(videoKey, 0);
@@ -816,7 +816,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                     // 包括Noise在内的所有动作都参与评分
                     String audioKey = record.audioAction;
                     float score = actionScores.getOrDefault(audioKey, 0f);
-                    score += record.audioConfidence * weight * 1.0f; // 音频权重1.0
+                    score += record.audioConfidence * weight * 1.2f; // 音频权重1.2
                     actionScores.put(audioKey, score);
 
                     int count = actionCounts.getOrDefault(audioKey, 0);
@@ -925,10 +925,10 @@ public class VideoProcessActivity extends AppCompatActivity {
             Log.d(TAG, String.format("[蓝牙] 检测到新动作: %s, 等待确认...", newAction));
         }
 
-        // [ADD] 动作稳定确认时间：默认 800ms；若从目标动作(do/oral)切到 Noise，则延长到 2400ms
-        int actionStableMs = 800;
+        // [ADD] 动作稳定确认时间：默认 0ms；若从目标动作(do/oral)切到 Noise，则延长到 1000ms
+        int actionStableMs = 0;
         if (isSexAction(currentBluetoothState) && "Noise".equals(newAction)) {
-            actionStableMs = 2400;
+            actionStableMs = 1000;
         }
 
         // [MOD] 使用动态稳定确认时间
