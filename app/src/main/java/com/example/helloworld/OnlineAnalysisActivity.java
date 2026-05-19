@@ -81,8 +81,10 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private long lastVideoInferenceTime = 0;
     private static final long VIDEO_INFERENCE_INTERVAL = 1000;
 
-    // 视频动作置信度阈值：低于此值判为 unclear（无效输出）
-    private static final float VIDEO_CONF_THRESHOLD = 0.4f;
+    // 视频动作置信度阈值：低于阈值判为 unclear（无效输出）
+    // normal_plot(不转) 用 0.5；oral/sex(转) 用 0.75
+    private static final float VIDEO_THRESHOLD_NORMAL = 0.5f;
+    private static final float VIDEO_THRESHOLD_ACTION = 0.75f;
 
     // 音频缓冲 - 使用统一的PcmCircularBuffer
     private PcmCircularBuffer pcmBuffer;
@@ -486,19 +488,28 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             actionClass = "";
             confidence = 0f;
             Log.w(TAG, "[视频线程] 推理结果无效，判为 unclear");
-        } else if (result.confidence < VIDEO_CONF_THRESHOLD) {
-            actionClass = "";
-            confidence = 0f;
-            Log.d(TAG, String.format("[视频线程] 置信度 %.2f < 阈值 %.2f，判为 unclear",
-                    result.confidence, VIDEO_CONF_THRESHOLD));
         } else if (result.index == 0) {
-            // normal_plot -> 不转
-            actionClass = "Noise";
-            confidence = result.confidence;
+            // normal_plot：置信度阈值 0.5
+            if (result.confidence < VIDEO_THRESHOLD_NORMAL) {
+                actionClass = "";
+                confidence = 0f;
+                Log.d(TAG, String.format("[视频线程] normal_plot 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                        result.confidence, VIDEO_THRESHOLD_NORMAL));
+            } else {
+                actionClass = "Noise";   // 不转
+                confidence = result.confidence;
+            }
         } else {
-            // oral / sex -> 转
-            actionClass = "do";
-            confidence = result.confidence;
+            // oral / sex：置信度阈值 0.75
+            if (result.confidence < VIDEO_THRESHOLD_ACTION) {
+                actionClass = "";
+                confidence = 0f;
+                Log.d(TAG, String.format("[视频线程] oral/sex 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                        result.confidence, VIDEO_THRESHOLD_ACTION));
+            } else {
+                actionClass = "do";   // 转
+                confidence = result.confidence;
+            }
         }
 
         // 原子更新结果
