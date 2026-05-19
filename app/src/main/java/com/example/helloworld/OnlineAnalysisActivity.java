@@ -492,13 +492,13 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         if (result == null || result.index < 0) {
             actionClass = "";
             confidence = 0f;
-            Log.w(TAG, "[视频线程] 推理结果无效，判为 unclear");
+            Log.w(TAG, "[同步分析] [视频线程] 推理结果无效，判为 unclear");
         } else if (result.index == 0) {
             // normal_plot：置信度阈值 0.5
             if (result.confidence < VIDEO_THRESHOLD_NORMAL) {
                 actionClass = "";
                 confidence = 0f;
-                Log.d(TAG, String.format("[视频线程] normal_plot 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                Log.d(TAG, String.format("[同步分析] [视频线程] normal_plot 置信度 %.2f < 阈值 %.2f，判为 unclear",
                         result.confidence, VIDEO_THRESHOLD_NORMAL));
             } else {
                 actionClass = "Noise";   // 不转
@@ -509,7 +509,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             if (result.confidence < VIDEO_THRESHOLD_ACTION) {
                 actionClass = "";
                 confidence = 0f;
-                Log.d(TAG, String.format("[视频线程] oral/sex 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                Log.d(TAG, String.format("[同步分析] [视频线程] oral/sex 置信度 %.2f < 阈值 %.2f，判为 unclear",
                         result.confidence, VIDEO_THRESHOLD_ACTION));
             } else {
                 actionClass = "do";   // 转
@@ -529,7 +529,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         if (OnlineAnalysisService.getInstance() != null) {
             OnlineAnalysisService.getInstance().updateFloatingVideoAction(displayText);
         }
-        Log.d(TAG, "[视频线程] " + displayText
+        Log.d(TAG, "[同步分析] [视频线程] " + displayText
                 + (result != null ? " probs=" + java.util.Arrays.toString(result.probs) : ""));
     }
 
@@ -589,13 +589,13 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                             if (index < 0) {
                                 action = "";
                                 confidence = 0f;
-                                Log.w(TAG, "[音频线程] 推理结果无效，判为 unclear");
+                                Log.w(TAG, "[同步分析] [音频线程] 推理结果无效，判为 unclear");
                             } else if (index == 2) {
                                 // noise：置信度阈值 0.6
                                 if (confidence < AUDIO_THRESHOLD_NOISE) {
                                     action = "";
                                     confidence = 0f;
-                                    Log.d(TAG, String.format("[音频线程] noise 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                                    Log.d(TAG, String.format("[同步分析] [音频线程] noise 置信度 %.2f < 阈值 %.2f，判为 unclear",
                                             result.confidence, AUDIO_THRESHOLD_NOISE));
                                 } else {
                                     action = "Noise";   // 不转
@@ -605,7 +605,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                                 if (confidence < AUDIO_THRESHOLD_ACTION) {
                                     action = "";
                                     confidence = 0f;
-                                    Log.d(TAG, String.format("[音频线程] sex/oral 置信度 %.2f < 阈值 %.2f，判为 unclear",
+                                    Log.d(TAG, String.format("[同步分析] [音频线程] sex/oral 置信度 %.2f < 阈值 %.2f，判为 unclear",
                                             result.confidence, AUDIO_THRESHOLD_ACTION));
                                 } else {
                                     action = "do";   // 转
@@ -620,6 +620,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                             final String displayText = action.isEmpty()
                                     ? "A: unclear"
                                     : String.format("A: %s (%.2f)", action, confidence);
+                            Log.d(TAG, "[同步分析] [音频线程] " + displayText);
                             if (OnlineAnalysisService.getInstance() != null) {
                                 OnlineAnalysisService.getInstance().updateFloatingAudioAction(displayText);
                             }
@@ -994,7 +995,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
                 if (levelChanged && gapOk) {
                     int levelToSend = currentLevel;
-                    Log.i(TAG, String.format("[蓝牙] [测试] 同动作更新档位：%s -> level=%d", currentBluetoothState, levelToSend));
+                    Log.i(TAG, String.format("[蓝牙] [同步分析] 同动作更新档位：%s -> level=%d", currentBluetoothState, levelToSend));
 
                     if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
                         BLEManager.globalManager.sendAction(currentBluetoothState, levelToSend);
