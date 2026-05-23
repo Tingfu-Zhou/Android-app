@@ -473,7 +473,7 @@ public class VideoProcessActivity extends AppCompatActivity {
 
     /**
      * 音频分析循环 - 在独立线程中运行
-     * 动作类别：label 0 对应着中出快，label 1 对应着中出慢，label 2 对应着口交，label 3 对应着杂音。
+     * 动作类别：label 0 对应着做爱，label 1 对应着口交，label 2 对应着杂音。
      */
     private long lastAudioInferenceTime = 0; // 记录上次音频推理的时间
     private static final long AUDIO_INFERENCE_INTERVAL = 1000; // 音频推理间隔1秒
