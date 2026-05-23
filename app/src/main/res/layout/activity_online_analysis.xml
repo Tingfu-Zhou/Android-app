@@ -3,7 +3,10 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:paddingLeft="16dp"
+    android:paddingRight="16dp"
+    android:paddingTop="160dp"
+    android:paddingBottom="16dp">
 
     <TextView
         android:id="@+id/tvStatus"
@@ -22,5 +25,14 @@
         android:textSize="16sp"
         android:gravity="center"
         android:layout_marginTop="50dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="温馨提示：部分视频播放软件会禁止第三方应用获取屏幕画面与音频内容，建议使用谷歌浏览器（Chrome）播放视频。Xcup 的下载页面中也提供了安卓版谷歌浏览器的官方下载地址。"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:lineSpacingExtra="4dp"
+        android:layout_marginTop="60dp" />
 
 </LinearLayout>
