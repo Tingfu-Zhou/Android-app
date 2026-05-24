@@ -831,7 +831,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 if (!record.videoAction.isEmpty() && !record.videoAction.equals("Background")) {
                     String videoKey = record.videoAction;
                     float score = actionScores.getOrDefault(videoKey, 0f);
-                    score += record.videoConfidence * weight * 0.8f;
+                    score += record.videoConfidence * weight * 0.7f;
                     actionScores.put(videoKey, score);
 
                     int count = actionCounts.getOrDefault(videoKey, 0);
