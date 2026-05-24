@@ -94,11 +94,27 @@ public class OnlineAnalysisService extends Service {
 
     // 音频静音检测
     private long lastAudioActiveTime = 0;
-    // ======= 修改开始：调整静音检测参数 =======
-    private static final long SILENCE_THRESHOLD_MS = 5000; // 改为5秒无声音才暂停（原来是3秒）
-    private static final float AUDIO_AMPLITUDE_THRESHOLD = 0.005f; // 降低静音阈值（原来是0.01f）
-    private int consecutiveSilentFrames = 0; // 添加连续静音帧计数
-    private static final int MIN_SILENT_FRAMES = 10; // 至少连续10个静音帧才认为是真正静音
+    // ======= 修改开始：RMS+峰值+子窗口+迟滞 的更精确 VAD =======
+    private static final long SILENCE_THRESHOLD_MS = 5000; // 5 秒无声才暂停
+    private int consecutiveSilentFrames = 0;               // 连续静音帧计数
+    private static final int MIN_SILENT_FRAMES = 10;       // 至少连续 10 帧（≈5s）才判定静音
+
+    // 把 0.5s 缓冲拆成 4 个子窗口（每个 ≈125ms），任一子窗口超阈值即视为整体有声
+    // —— 避免在长窗口里偶尔的安静段把平均/峰值稀释掉
+    private static final int VAD_SUB_WINDOWS = 4;
+
+    // 当前已为"无声"时：转为"有声"的激活阈值（任一指标超过即可）—— 中等敏感
+    private static final float VAD_ACTIVATE_RMS_DB  = -55f;
+    private static final float VAD_ACTIVATE_PEAK_DB = -42f;
+
+    // 当前已为"有声"时：保持"有声"的释放阈值（任一指标超过即可）—— 比激活阈值更宽松
+    // 这样很难误判为静音；只有 RMS 和 峰值 都很低才允许翻转到无声
+    private static final float VAD_KEEP_RMS_DB  = -60f;
+    private static final float VAD_KEEP_PEAK_DB = -48f;
+
+    // 调试日志节流（每 N 秒打一条实测 dB，便于后续调参）
+    private long lastVadLogTime = 0;
+    private static final long VAD_LOG_INTERVAL_MS = 5000;
     // ======= 修改结束 =======
 
     // 帧率控制
@@ -404,8 +420,8 @@ public class OnlineAnalysisService extends Service {
                 int bytesRead = audioRecord.read(buffer, 0, buffer.length);
 
                 if (bytesRead > 0) {
-                    // 检测音频活动
-                    boolean hasAudio = detectAudioActivity(buffer, bytesRead);
+                    // 检测音频活动（带迟滞：当前是否已"有声"会影响阈值）
+                    boolean hasAudio = detectAudioActivity(buffer, bytesRead, wasActive);
 
                     // ======= 修改开始：改进静音检测逻辑 =======
                     if (hasAudio) {
@@ -467,15 +483,73 @@ public class OnlineAnalysisService extends Service {
         }
     }
 
-    private boolean detectAudioActivity(byte[] buffer, int length) {
-        // 简单的振幅检测
-        float sum = 0;
-        for (int i = 0; i < length; i += 2) {
-            short sample = (short) ((buffer[i + 1] << 8) | (buffer[i] & 0xFF));
-            sum += Math.abs(sample / 32768.0f);
+    /**
+     * 子窗口 + RMS/峰值 + 迟滞 的 VAD。
+     * - 把缓冲拆成 VAD_SUB_WINDOWS 个子窗口，任一窗口超阈值即视为整体有声；
+     *   避免长窗口里偶尔的安静段把平均值/峰值稀释掉。
+     * - RMS 和 峰值 任一指标超过阈值即视为有声。
+     * - 当前 currentlyActive=true 时使用更宽松的"保持有声"阈值（更难误判为静音）；
+     *   currentlyActive=false 时使用稍严的"激活"阈值（避免噪声触发恢复）。
+     */
+    private boolean detectAudioActivity(byte[] buffer, int length, boolean currentlyActive) {
+        int sampleCount = length / 2;
+        if (sampleCount <= 0) return currentlyActive; // 没数据时保持原状态
+
+        int samplesPerWindow = Math.max(1, sampleCount / VAD_SUB_WINDOWS);
+
+        // 当前状态决定阈值（迟滞）
+        final float rmsThreshold  = currentlyActive ? VAD_KEEP_RMS_DB  : VAD_ACTIVATE_RMS_DB;
+        final float peakThreshold = currentlyActive ? VAD_KEEP_PEAK_DB : VAD_ACTIVATE_PEAK_DB;
+
+        boolean active = false;
+        float maxRmsDb  = Float.NEGATIVE_INFINITY;
+        float maxPeakDb = Float.NEGATIVE_INFINITY;
+
+        for (int w = 0; w < VAD_SUB_WINDOWS; w++) {
+            int sampleStart = w * samplesPerWindow;
+            int sampleEnd   = (w == VAD_SUB_WINDOWS - 1) ? sampleCount : sampleStart + samplesPerWindow;
+            int byteStart   = sampleStart * 2;
+            int byteEnd     = Math.min(sampleEnd * 2, length);
+            int subSamples  = (byteEnd - byteStart) / 2;
+            if (subSamples <= 0) continue;
+
+            double sumSquare = 0.0;
+            int peakAbs = 0;
+            for (int i = byteStart; i + 1 < byteEnd; i += 2) {
+                short sample = (short) ((buffer[i + 1] << 8) | (buffer[i] & 0xFF));
+                int absSample = (sample == Short.MIN_VALUE) ? Short.MAX_VALUE : Math.abs(sample);
+                if (absSample > peakAbs) peakAbs = absSample;
+                double norm = sample / 32768.0;
+                sumSquare += norm * norm;
+            }
+
+            double rms  = Math.sqrt(sumSquare / subSamples);
+            double peak = peakAbs / 32768.0;
+            float rmsDb  = (float) (20.0 * Math.log10(Math.max(rms,  1e-9)));
+            float peakDb = (float) (20.0 * Math.log10(Math.max(peak, 1e-9)));
+
+            if (rmsDb  > maxRmsDb)  maxRmsDb  = rmsDb;
+            if (peakDb > maxPeakDb) maxPeakDb = peakDb;
+
+            if (rmsDb > rmsThreshold || peakDb > peakThreshold) {
+                active = true;
+                // 早退出：已经判定为有声，剩余子窗口不必再算
+                // 但为了打印 max dB 仍继续（开销很小）
+            }
         }
-        float average = sum / (length / 2);
-        return average > AUDIO_AMPLITUDE_THRESHOLD;
+
+        // 节流的调试日志：方便后续观察实际 dB 水平 / 调参
+        long now = System.currentTimeMillis();
+        if (now - lastVadLogTime > VAD_LOG_INTERVAL_MS) {
+            lastVadLogTime = now;
+            Log.d(TAG, String.format(
+                    "[音频检测] maxSubRMS=%.1fdB maxSubPeak=%.1fdB -> active=%b (state=%s, th: RMS>%.0fdB or Peak>%.0fdB)",
+                    maxRmsDb, maxPeakDb, active,
+                    currentlyActive ? "ACTIVE" : "SILENT",
+                    rmsThreshold, peakThreshold));
+        }
+
+        return active;
     }
 
     private void showFloatingWindow() {
