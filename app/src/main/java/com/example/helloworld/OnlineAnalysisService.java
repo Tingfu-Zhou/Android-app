@@ -20,25 +20,15 @@ import android.media.AudioPlaybackCaptureConfiguration;
 import android.media.AudioRecord;
 import android.media.Image;
 import android.media.ImageReader;
-import android.media.MediaRecorder;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
-import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.Log;
-import android.view.Gravity;
-import android.view.LayoutInflater;
-import android.view.MotionEvent;
-import android.view.View;
-import android.view.WindowManager;
-import android.widget.Button;
-import android.widget.TextView;
 
 import androidx.annotation.RequiresApi;
 import androidx.core.app.NotificationCompat;
@@ -51,14 +41,6 @@ public class OnlineAnalysisService extends Service {
     private static final String TAG = "OnlineAnalysisService";
     private static final String CHANNEL_ID = "OnlineAnalysisChannel";
     private static final int NOTIFICATION_ID = 1001;
-
-    // ======= 添加开始：静态实例引用 =======
-    private static OnlineAnalysisService instance;
-
-    public static OnlineAnalysisService getInstance() {
-        return instance;
-    }
-    // ======= 添加结束 =======
 
     // 屏幕捕获相关
     private MediaProjectionManager mediaProjectionManager;
@@ -76,15 +58,6 @@ public class OnlineAnalysisService extends Service {
     private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
     private final AtomicBoolean isAudioRecording = new AtomicBoolean(false);
     private Thread audioThread;
-
-    // 悬浮窗相关
-    private WindowManager windowManager;
-    private View floatingView;
-    // ======= 添加开始：悬浮窗TextView引用 =======
-    private TextView tvVideoAction;
-    private TextView tvAudioAction;
-    private TextView tvOverlay;
-    // ======= 添加结束 =======
 
     // 数据回调
     private static OnlineDataCallback dataCallback;
@@ -121,37 +94,12 @@ public class OnlineAnalysisService extends Service {
     private long lastFrameTime = 0;
     private static final long FRAME_INTERVAL_MS = 100; // 100ms一帧，与本地分析一致
 
-    // ======= 添加开始：为Service添加接口更新悬浮窗 =======
     public interface OnlineDataCallback {
         void onFrameAvailable(Bitmap frame, long timestamp);
         void onAudioDataAvailable(byte[] audioData, int length);
         void onAudioStateChanged(boolean hasAudio);
         void onServiceStopped();
-        // 新增：UI更新回调
-        void onVideoActionUpdate(String action, float confidence);
-        void onAudioActionUpdate(String action, float confidence);
-        void onFusionResultUpdate(String result);
     }
-
-    // 新增：更新悬浮窗的UI方法
-    public void updateFloatingVideoAction(final String text) {
-        if (tvVideoAction != null) {
-            // mainHandler.post(() -> tvVideoAction.setText(text)); 正式版隐藏悬浮窗调试UI
-        }
-    }
-
-    public void updateFloatingAudioAction(final String text) {
-        if (tvAudioAction != null) {
-            // mainHandler.post(() -> tvAudioAction.setText(text)); 正式版隐藏悬浮窗调试UI
-        }
-    }
-
-    public void updateFloatingFusionResult(final String text) {
-        if (tvOverlay != null) {
-            // mainHandler.post(() -> tvOverlay.setText(text)); 正式版隐藏悬浮窗调试UI
-        }
-    }
-    // ======= 添加结束 =======
 
     public static void setDataCallback(OnlineDataCallback callback) {
         dataCallback = callback;
@@ -162,12 +110,7 @@ public class OnlineAnalysisService extends Service {
         super.onCreate();
         Log.d(TAG, "Service onCreate");
 
-        // ======= 添加开始：设置实例引用 =======
-        instance = this;
-        // ======= 添加结束 =======
-
         mediaProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         mainHandler = new Handler(Looper.getMainLooper());
 
         // 创建图像处理线程
@@ -219,9 +162,6 @@ public class OnlineAnalysisService extends Service {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startAudioCapture(data);
             }
-
-            // 显示悬浮窗
-            showFloatingWindow();
         }
 
         return START_NOT_STICKY;
@@ -552,89 +492,9 @@ public class OnlineAnalysisService extends Service {
         return active;
     }
 
-    private void showFloatingWindow() {
-        // 检查悬浮窗权限
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            Log.w(TAG, "No overlay permission");
-            return;
-        }
-
-        // 创建悬浮窗视图
-        floatingView = LayoutInflater.from(this).inflate(R.layout.floating_window, null);
-
-        // ======= 添加开始：获取TextView引用 =======
-        tvVideoAction = floatingView.findViewById(R.id.tvVideoAction);
-        tvAudioAction = floatingView.findViewById(R.id.tvAudioAction);
-        tvOverlay = floatingView.findViewById(R.id.tvOverlay);
-        // ======= 添加结束 =======
-
-        // ======= [ADD] 正式版隐藏悬浮窗调试UI =======
-        if (tvVideoAction != null) tvVideoAction.setVisibility(View.GONE);
-        if (tvAudioAction != null) tvAudioAction.setVisibility(View.GONE);
-        if (tvOverlay != null) tvOverlay.setVisibility(View.GONE);
-        // ======= [ADD END] =======
-
-
-        // 设置悬浮窗参数
-        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ?
-                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY :
-                        WindowManager.LayoutParams.TYPE_PHONE,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT
-        );
-
-        params.gravity = Gravity.TOP | Gravity.END;
-        params.x = 10;
-        params.y = 100;
-
-        // 设置退出按钮点击事件
-        Button btnExit = floatingView.findViewById(R.id.btn_exit);
-        btnExit.setOnClickListener(v -> {
-            Log.d(TAG, "Exit button clicked");
-            stopSelf();
-        });
-
-        // 添加拖动功能
-        floatingView.setOnTouchListener(new View.OnTouchListener() {
-            private int initialX;
-            private int initialY;
-            private float initialTouchX;
-            private float initialTouchY;
-
-            @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                switch (event.getAction()) {
-                    case MotionEvent.ACTION_DOWN:
-                        initialX = params.x;
-                        initialY = params.y;
-                        initialTouchX = event.getRawX();
-                        initialTouchY = event.getRawY();
-                        return true;
-
-                    case MotionEvent.ACTION_MOVE:
-                        params.x = initialX - (int) (event.getRawX() - initialTouchX);
-                        params.y = initialY + (int) (event.getRawY() - initialTouchY);
-                        windowManager.updateViewLayout(floatingView, params);
-                        return true;
-                }
-                return false;
-            }
-        });
-
-        // 添加悬浮窗到窗口
-        windowManager.addView(floatingView, params);
-    }
-
     @Override
     public void onDestroy() {
         Log.d(TAG, "Service onDestroy");
-
-        // ======= 添加开始：清除实例引用 =======
-        instance = null;
-        // ======= 添加结束 =======
 
         // ★ 新增：退出在线模式时发送停止信号
         if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
@@ -672,12 +532,6 @@ public class OnlineAnalysisService extends Service {
         if (mediaProjection != null) {
             mediaProjection.stop();
             mediaProjection = null;
-        }
-
-        // 移除悬浮窗
-        if (floatingView != null && windowManager != null) {
-            windowManager.removeView(floatingView);
-            floatingView = null;
         }
 
         // 停止图像处理线程

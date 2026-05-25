@@ -24,6 +24,8 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.google.android.material.appbar.MaterialToolbar;
+
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -34,16 +36,10 @@ import java.util.concurrent.atomic.AtomicReference;
 public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineAnalysisService.OnlineDataCallback {
     private static final String TAG = "OnlineAnalysisActivity";
     private static final int REQUEST_CODE_MEDIA_PROJECTION = 1001;
-    private static final int REQUEST_CODE_OVERLAY_PERMISSION = 1002;
     private static final int REQUEST_CODE_AUDIO_PERMISSION = 1003;
 
     // UI组件
     private TextView tvStatus;
-    // ======= 修改开始：移除这三个TextView的声明（移到Service中） =======
-    // private TextView tvVideoAction;
-    // private TextView tvAudioAction;
-    // private TextView tvOverlay;
-    // ======= 修改结束 =======
 
     // 分析相关
     private VideoClassifierHelper videoClassifier;
@@ -175,11 +171,11 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
         // 初始化UI组件
         tvStatus = findViewById(R.id.tvStatus);
-        // ======= 修改开始：注释掉（不再使用Activity中的TextView） =======
-        // tvVideoAction = findViewById(R.id.tvVideoAction);
-        // tvAudioAction = findViewById(R.id.tvAudioAction);
-        // tvOverlay = findViewById(R.id.tvOverlay);
-        // ======= 修改结束 =======
+
+        MaterialToolbar topAppBar = findViewById(R.id.topAppBar);
+        if (topAppBar != null) {
+            topAppBar.setNavigationOnClickListener(v -> finish());
+        }
 
         // 初始化推理助手
         videoClassifier = new VideoClassifierHelper(this);
@@ -231,22 +227,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             return;
         }
 
-        // 检查悬浮窗权限
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            new AlertDialog.Builder(this)
-                    .setTitle("需要悬浮窗权限")
-                    .setMessage("在线分析需要悬浮窗权限来显示控制按钮")
-                    .setPositiveButton("去设置", (dialog, which) -> {
-                        Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                Uri.parse("package:" + getPackageName()));
-                        startActivityForResult(intent, REQUEST_CODE_OVERLAY_PERMISSION);
-                    })
-                    .setNegativeButton("取消", (dialog, which) -> finish())
-                    .show();
-        } else {
-            // 请求屏幕录制权限
-            requestScreenCapture();
-        }
+        // 请求屏幕录制权限
+        requestScreenCapture();
     }
 
     private void requestScreenCapture() {
@@ -258,14 +240,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
 
-        if (requestCode == REQUEST_CODE_OVERLAY_PERMISSION) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && Settings.canDrawOverlays(this)) {
-                requestScreenCapture();
-            } else {
-                Toast.makeText(this, "需要悬浮窗权限", Toast.LENGTH_SHORT).show();
-                finish();
-            }
-        } else if (requestCode == REQUEST_CODE_MEDIA_PROJECTION) {
+        if (requestCode == REQUEST_CODE_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
                 // 启动服务
                 Intent serviceIntent = new Intent(this, OnlineAnalysisService.class);
@@ -281,7 +256,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 // 启动多线程分析
                 startMultiThreadAnalysis();
 
-                tvStatus.setText("在线分析已启动");
+                tvStatus.setText(R.string.online_status_running);
             } else {
                 Toast.makeText(this, "需要屏幕录制权限", Toast.LENGTH_SHORT).show();
                 finish();
@@ -363,23 +338,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         Log.d(TAG, "服务已停止");
         finish();
     }
-
-    // ======= 添加开始：实现新增的回调方法（空实现） =======
-    @Override
-    public void onVideoActionUpdate(String action, float confidence) {
-        // UI更新已在Service中处理，这里不需要实现
-    }
-
-    @Override
-    public void onAudioActionUpdate(String action, float confidence) {
-        // UI更新已在Service中处理，这里不需要实现
-    }
-
-    @Override
-    public void onFusionResultUpdate(String result) {
-        // UI更新已在Service中处理，这里不需要实现
-    }
-    // ======= 添加结束 =======
 
     private void startMultiThreadAnalysis() {
         Log.d(TAG, "启动多线程分析系统...");
@@ -522,13 +480,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         latestVideoConfidence.set(confidence);
         latestVideoTimestamp.set(System.currentTimeMillis());
 
-        // 通过 Service 更新悬浮窗 UI
         String displayText = actionClass.isEmpty()
                 ? "V: unclear"
                 : String.format("V: %s (%.2f)", actionClass, confidence);
-        if (OnlineAnalysisService.getInstance() != null) {
-            OnlineAnalysisService.getInstance().updateFloatingVideoAction(displayText);
-        }
         Log.d(TAG, "[同步分析] [视频线程] " + displayText
                 + (result != null ? " probs=" + java.util.Arrays.toString(result.probs) : ""));
     }
@@ -616,14 +570,10 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                             latestAudioConfidence.set(confidence);
                             latestAudioTimestamp.set(System.currentTimeMillis());
 
-                            // 通过Service更新悬浮窗UI
                             final String displayText = action.isEmpty()
                                     ? "A: unclear"
                                     : String.format("A: %s (%.2f)", action, confidence);
                             Log.d(TAG, "[同步分析] [音频线程] " + displayText);
-                            if (OnlineAnalysisService.getInstance() != null) {
-                                OnlineAnalysisService.getInstance().updateFloatingAudioAction(displayText);
-                            }
 
                             lastAudioInferenceTime = currentSystemTime;
                         }
@@ -726,19 +676,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     } else {
                         Log.d(TAG, "[融合] BLE暂停中，跳过动作: " + finalAction);
                     }
-                }
-
-                // 通过Service更新悬浮窗UI
-                String bluetoothAction = latestBluetoothAction.get();
-                String displayText;
-                if (!bluetoothAction.isEmpty()) {
-                    displayText = "蓝牙: " + bluetoothAction + "节奏：" + finalFreq;
-                } else {
-                    displayText = "蓝牙: 等待...";
-                }
-
-                if (OnlineAnalysisService.getInstance() != null) {
-                    OnlineAnalysisService.getInstance().updateFloatingFusionResult(displayText);
                 }
 
                 long elapsed = System.currentTimeMillis() - t0;
