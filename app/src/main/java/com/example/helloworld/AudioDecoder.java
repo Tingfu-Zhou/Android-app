@@ -1,7 +1,6 @@
 package com.example.helloworld;
 
 import android.content.Context;
-import android.content.res.AssetFileDescriptor;
 import android.media.MediaCodec;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
@@ -10,6 +9,7 @@ import android.util.Log;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Map;
 import java.util.function.Supplier;
 
 
@@ -31,6 +31,7 @@ public class AudioDecoder {
 
     private Context context;
     private Uri videoUri;
+    private Map<String, String> httpHeaders;   // 网页视频模式下使用的 HTTP headers
     private AudioInferenceHelper audioHelper;
     private volatile boolean isDecoding = false;
 
@@ -74,8 +75,14 @@ public class AudioDecoder {
 
 
     public AudioDecoder(Context context, Uri videoUri, PcmCircularBuffer buffer, Supplier<Integer> videoPositionProvider) {
+        this(context, videoUri, null, buffer, videoPositionProvider);
+    }
+
+    public AudioDecoder(Context context, Uri videoUri, Map<String, String> httpHeaders,
+                        PcmCircularBuffer buffer, Supplier<Integer> videoPositionProvider) {
         this.context = context;
         this.videoUri = videoUri;
+        this.httpHeaders = httpHeaders;
         this.pcmBuffer = buffer;
         this.videoPositionProvider = videoPositionProvider;
     }
@@ -110,8 +117,9 @@ public class AudioDecoder {
 
             try {
                 Log.d(TAG, "startDecoding: 打开视频资源...");
-                AssetFileDescriptor afd = context.getContentResolver().openAssetFileDescriptor(videoUri, "r");
-                extractor.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength());
+                // MediaExtractor.setDataSource(Context, Uri, headers) 同时支持 content://、file:// 和 http(s)://
+                // 对网页视频模式必须走这条路径，否则 openAssetFileDescriptor 在 http(s) 上会抛异常
+                extractor.setDataSource(context, videoUri, httpHeaders);
                 Log.d(TAG, "startDecoding: MediaExtractor 已设置数据源, 开始寻找音频轨道");
 
                 int audioTrackIndex = -1;

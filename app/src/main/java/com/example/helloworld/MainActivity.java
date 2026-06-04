@@ -184,6 +184,16 @@ public class MainActivity extends AppCompatActivity {
                 startActivity(intent);
             }
         });
+
+        // 网页视频入口：打开 WebView 嗅探视频流，再走离线分析链路
+        View btnWebVideo = findViewById(R.id.btnWebVideo);
+        btnWebVideo.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent(MainActivity.this, WebVideoActivity.class);
+                startActivity(intent);
+            }
+        });
     }
 
     // [新增] 请求BLE权限

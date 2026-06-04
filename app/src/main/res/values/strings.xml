@@ -10,8 +10,20 @@
     <string name="mode_local_subtitle">从相册选择</string>
     <string name="mode_online_title">在线分析</string>
     <string name="mode_online_subtitle">app视频</string>
+    <string name="mode_web_title">网页视频</string>
+    <string name="mode_web_subtitle">输入网址，自动嗅探</string>
     <string name="resume_control_inactive">暂停控制（未激活）</string>
     <string name="connect_bluetooth">连接蓝牙设备</string>
+
+    <!-- Web video page -->
+    <string name="web_video_title">网页视频</string>
+    <string name="web_video_url_hint">粘贴视频网页链接 (https://...)</string>
+    <string name="web_video_open">打开</string>
+    <string name="web_video_status_idle">输入视频网页地址并点击\"打开\"</string>
+    <string name="web_video_status_loading">正在加载页面，等待视频出现…</string>
+    <string name="web_video_status_found">已嗅探到视频流，可点击开始分析</string>
+    <string name="web_video_start_analyze">开始分析</string>
+    <string name="web_video_back">返回</string>
 
     <!-- Online analysis page -->
     <string name="online_back">返回</string>

@@ -166,7 +166,7 @@ public class VideoProcessActivity extends AppCompatActivity {
     // [12.30] Loudness 档位估计器（音频节律输出）
     private final AudioLoudnessLevelEstimator loudnessEstimator = new AudioLoudnessLevelEstimator(16000);
 
-    // [12.30] 音频“响度档位”结果（线程安全共享）
+    // [12.30] 音频”响度档位”结果（线程安全共享）
     private final java.util.concurrent.atomic.AtomicInteger latestAudioLoudLevel =
             new java.util.concurrent.atomic.AtomicInteger(0);
     private final java.util.concurrent.atomic.AtomicReference<Float> latestAudioLoudConf =
@@ -175,6 +175,22 @@ public class VideoProcessActivity extends AppCompatActivity {
             new java.util.concurrent.atomic.AtomicLong(0L);
     private final java.util.concurrent.atomic.AtomicBoolean latestAudioLoudValid =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    // [WebVideo] 网页视频模式相关
+    // 网页视频模式下没有 seek，没有 MediaController，分析的开/停由音频 VAD（参考在线模式）决定
+    private boolean isWebVideoMode = false;
+    // VAD 状态
+    private boolean webVadActive = false;
+    private long webVadLastActiveMs = 0;
+    private int webVadConsecutiveSilentTicks = 0;
+    // VAD 参数（音频循环每秒一次，5 个 silent tick ≈ 5 秒静音才暂停）
+    private static final int WEB_VAD_MIN_SILENT_TICKS = 5;
+    private static final long WEB_VAD_SILENCE_MS = 5000;
+    private static final float WEB_VAD_ACTIVATE_RMS_DB = -55f;
+    private static final float WEB_VAD_ACTIVATE_PEAK_DB = -42f;
+    private static final float WEB_VAD_KEEP_RMS_DB = -60f;
+    private static final float WEB_VAD_KEEP_PEAK_DB = -48f;
+    private long lastWebVadLogMs = 0;
 
 
     @Override
@@ -204,10 +220,28 @@ public class VideoProcessActivity extends AppCompatActivity {
         videoClassifier = new VideoClassifierHelper(this);
         Log.d(TAG, "onCreate: VideoClassifierHelper (MobileNetV3Small) 初始化完成");
 
+        // [WebVideo] 解析网页视频模式标志和 HTTP headers
+        isWebVideoMode = intent.getBooleanExtra(WebVideoActivity.EXTRA_IS_WEB_VIDEO, false);
+        Map<String, String> httpHeaders = null;
+        if (isWebVideoMode) {
+            httpHeaders = new HashMap<>();
+            String referer = intent.getStringExtra(WebVideoActivity.EXTRA_HTTP_REFERER);
+            String ua = intent.getStringExtra(WebVideoActivity.EXTRA_HTTP_UA);
+            String cookie = intent.getStringExtra(WebVideoActivity.EXTRA_HTTP_COOKIE);
+            if (referer != null && !referer.isEmpty()) httpHeaders.put("Referer", referer);
+            if (ua != null && !ua.isEmpty()) httpHeaders.put("User-Agent", ua);
+            if (cookie != null && !cookie.isEmpty()) httpHeaders.put("Cookie", cookie);
+            Log.d(TAG, "onCreate: 网页视频模式启用，headers=" + httpHeaders.keySet());
+        }
+
         Uri videoUri = intent.getData();
         if (videoUri != null) {
-            videoView.setVideoURI(videoUri);
-            Log.d(TAG, "onCreate: 设置用户选择的视频 URI: " + videoUri);
+            if (isWebVideoMode && httpHeaders != null && !httpHeaders.isEmpty()) {
+                videoView.setVideoURI(videoUri, httpHeaders);
+            } else {
+                videoView.setVideoURI(videoUri);
+            }
+            Log.d(TAG, "onCreate: 设置视频 URI: " + videoUri + " (webMode=" + isWebVideoMode + ")");
         } else {
             Log.e(TAG, "onCreate: 没有有效的视频 URI，退出！");
             finish();
@@ -216,16 +250,23 @@ public class VideoProcessActivity extends AppCompatActivity {
 
         // 初始化VideoFrameExtractor
         try {
-            videoFrameExtractor = new VideoFrameExtractor(this, videoUri);
+            videoFrameExtractor = new VideoFrameExtractor(this, videoUri, httpHeaders);
             Log.d(TAG, "onCreate: VideoFrameExtractor 初始化成功");
         } catch (IOException e) {
             Log.e(TAG, "onCreate: VideoFrameExtractor 初始化失败", e);
             finish();
         }
 
-        // 设置视频控制器
-        videoView.setMediaController(new MediaController(this));
+        // 设置视频控制器（网页视频模式下没有 seek，跳过 MediaController）
+        if (!isWebVideoMode) {
+            videoView.setMediaController(new MediaController(this));
+        }
         videoView.requestFocus();
+
+        // [WebVideo] 网页视频模式默认 analysis 暂停，由音频 VAD 驱动 resume/pause
+        if (isWebVideoMode) {
+            isAnalysisPaused.set(true);
+        }
 
         // 视频播放完成监听
         videoView.setOnCompletionListener(mp -> {
@@ -243,8 +284,10 @@ public class VideoProcessActivity extends AppCompatActivity {
 
             // 设置初始视频缩放
             adjustVideoSize(false);
-            // 设置 seek 完成监听，检测用户拖动视频播放进度
-            mp.setOnSeekCompleteListener(seekMp -> handleSeekComplete());
+            // 设置 seek 完成监听，检测用户拖动视频播放进度（网页视频模式无 seek，跳过）
+            if (!isWebVideoMode) {
+                mp.setOnSeekCompleteListener(seekMp -> handleSeekComplete());
+            }
             videoView.start();
             startMultiThreadAnalysis(); // 启动多线程分析
         });
@@ -259,7 +302,7 @@ public class VideoProcessActivity extends AppCompatActivity {
         audioHelper = new AudioInferenceHelper(this);
         // 启动音频解码器，从视频中提取音频流进行实时分析
         pcmBuffer = new PcmCircularBuffer(16000, 20); // 采样率 16kHz，最多缓冲 20 秒
-        audioDecoder = new AudioDecoder(this, videoUri, pcmBuffer, () -> videoView.getCurrentPosition());
+        audioDecoder = new AudioDecoder(this, videoUri, httpHeaders, pcmBuffer, () -> videoView.getCurrentPosition());
 
         audioDecoder.setOnCompleteListener(() -> {
             isAudioCompleted = true;
@@ -277,27 +320,29 @@ public class VideoProcessActivity extends AppCompatActivity {
             }
         });
 
-        // 播放状态监听
-        // 播放状态检测逻辑：每 200ms 监听一次 videoView 播放状态; 检测用户暂停/恢复播放进度
-        playStateHandler = new Handler(Looper.getMainLooper());
-        playStateChecker = new Runnable() {
-            boolean lastPlayingState = true;
+        // 播放状态监听（仅离线模式）
+        // 网页视频模式下分析的开/停由音频 VAD 驱动，不靠 VideoView.isPlaying()
+        if (!isWebVideoMode) {
+            playStateHandler = new Handler(Looper.getMainLooper());
+            playStateChecker = new Runnable() {
+                boolean lastPlayingState = true;
 
-            @Override
-            public void run() {
-                boolean isPlayingNow = videoView.isPlaying();
-                if (isPlayingNow != lastPlayingState) {
-                    if (isPlayingNow) {
-                        resumeAnalysis();
-                    } else {
-                        pauseAnalysis();
+                @Override
+                public void run() {
+                    boolean isPlayingNow = videoView.isPlaying();
+                    if (isPlayingNow != lastPlayingState) {
+                        if (isPlayingNow) {
+                            resumeAnalysis();
+                        } else {
+                            pauseAnalysis();
+                        }
+                        lastPlayingState = isPlayingNow;
                     }
-                    lastPlayingState = isPlayingNow;
+                    playStateHandler.postDelayed(this, 200);
                 }
-                playStateHandler.postDelayed(this, 200);
-            }
-        };
-        playStateHandler.post(playStateChecker);
+            };
+            playStateHandler.post(playStateChecker);
+        }
 
         // 初始化主线程Handler
         mainHandler = new Handler(Looper.getMainLooper());
@@ -485,6 +530,11 @@ public class VideoProcessActivity extends AppCompatActivity {
                 if (shouldStop.get()) {
                     Log.d(TAG, "[音频线程] 收到停止信号，退出循环");
                     return;
+                }
+
+                // [WebVideo] 网页视频模式：先跑 VAD（不论当前是否暂停），由 VAD 决定要不要 resume/pause
+                if (isWebVideoMode) {
+                    runWebVideoVadTick();
                 }
 
                 if (isAnalysisPaused.get()) {
@@ -1202,6 +1252,61 @@ public class VideoProcessActivity extends AppCompatActivity {
         };
 
         seekHandler.postDelayed(pendingSeekRunnable, 500);
+    }
+
+    /**
+     * [WebVideo] 网页视频模式音频 VAD。
+     * 在音频线程每秒触发一次。读取当前播放位置附近 0.25s 的 PCM，
+     * 用 RMS/峰值 + 迟滞判定是否有声，决定 resume/pauseAnalysis。
+     */
+    private void runWebVideoVadTick() {
+        long currentMs = videoView.getCurrentPosition();
+        float[] samples = pcmBuffer.readWindowRelaxed(currentMs, 4000); // 0.25s @ 16kHz
+        if (samples == null || samples.length == 0) {
+            // PCM 未就绪：不切换状态，等下一拍再看
+            return;
+        }
+
+        float rmsTh  = webVadActive ? WEB_VAD_KEEP_RMS_DB  : WEB_VAD_ACTIVATE_RMS_DB;
+        float peakTh = webVadActive ? WEB_VAD_KEEP_PEAK_DB : WEB_VAD_ACTIVATE_PEAK_DB;
+
+        double sumSq = 0;
+        float peak = 0f;
+        for (float s : samples) {
+            sumSq += s * s;
+            float a = Math.abs(s);
+            if (a > peak) peak = a;
+        }
+        double rms = Math.sqrt(sumSq / samples.length);
+        float rmsDb  = (float) (20.0 * Math.log10(Math.max(rms,  1e-9)));
+        float peakDb = (float) (20.0 * Math.log10(Math.max(peak, 1e-9)));
+        boolean active = rmsDb > rmsTh || peakDb > peakTh;
+
+        long now = System.currentTimeMillis();
+        if (now - lastWebVadLogMs > 5000) {
+            lastWebVadLogMs = now;
+            Log.d(TAG, String.format("[网页VAD] rms=%.1fdB peak=%.1fdB -> active=%b (state=%s)",
+                    rmsDb, peakDb, active, webVadActive ? "ACTIVE" : "SILENT"));
+        }
+
+        if (active) {
+            webVadLastActiveMs = now;
+            webVadConsecutiveSilentTicks = 0;
+            if (!webVadActive) {
+                webVadActive = true;
+                Log.i(TAG, "[网页VAD] 检测到音频活动，恢复分析");
+                mainHandler.post(VideoProcessActivity.this::resumeAnalysis);
+            }
+        } else {
+            webVadConsecutiveSilentTicks++;
+            if (webVadActive
+                    && webVadConsecutiveSilentTicks >= WEB_VAD_MIN_SILENT_TICKS
+                    && (now - webVadLastActiveMs) > WEB_VAD_SILENCE_MS) {
+                webVadActive = false;
+                Log.i(TAG, "[网页VAD] 静音超过 " + WEB_VAD_SILENCE_MS + "ms，暂停分析");
+                mainHandler.post(VideoProcessActivity.this::pauseAnalysis);
+            }
+        }
     }
 
     private void pauseAnalysis() {

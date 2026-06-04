@@ -41,7 +41,8 @@
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:theme="@style/Theme.Helloworld">
+        android:theme="@style/Theme.Helloworld"
+        android:usesCleartextTraffic="true">
 
         <!-- ✅ 视频分析页面（支持横屏切换而不重建） -->
         <activity
@@ -65,6 +66,13 @@
             android:exported="false"
             android:configChanges="orientation|screenSize"
             android:launchMode="singleTask" />
+
+        <!-- 网页视频Activity（In-app WebView + 视频流嗅探） -->
+        <activity
+            android:name=".WebVideoActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="portrait" />
 
         <!-- 在线分析服务 -->
         <service

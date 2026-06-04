@@ -13,6 +13,7 @@ import android.graphics.SurfaceTexture;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Map;
 
 import android.opengl.EGL14;
 import android.opengl.EGLConfig;
@@ -38,8 +39,12 @@ public class VideoFrameExtractor {
     private static final int TARGET_HEIGHT = 160;
 
     public VideoFrameExtractor(Context context, Uri videoUri) throws IOException {
+        this(context, videoUri, null);
+    }
+
+    public VideoFrameExtractor(Context context, Uri videoUri, Map<String, String> headers) throws IOException {
         extractor = new MediaExtractor();
-        extractor.setDataSource(context, videoUri, null);
+        extractor.setDataSource(context, videoUri, headers);
 
         // 查找视频轨道
         int videoTrackIndex = -1;
