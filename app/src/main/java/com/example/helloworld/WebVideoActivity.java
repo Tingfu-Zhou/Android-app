@@ -189,6 +189,10 @@ public class WebVideoActivity extends AppCompatActivity {
             Log.w(TAG, "读取 Cookie 失败", e);
         }
 
+        Log.i(TAG, "启动 VideoProcessActivity, url=" + videoUrl
+                + ", referer=" + detectedReferer.get()
+                + ", ua=" + ua);
+        Toast.makeText(this, "正在打开分析页…", Toast.LENGTH_SHORT).show();
         startActivity(intent);
     }
 
@@ -277,8 +281,10 @@ public class WebVideoActivity extends AppCompatActivity {
                     detectedVideoUrl.set(reqUrl);
 
                     Log.i(TAG, "嗅到视频流: " + reqUrl);
+                    final String displayUrl = reqUrl;
                     runOnUiThread(() -> {
-                        tvStatus.setText(getString(R.string.web_video_status_found));
+                        tvStatus.setText(getString(R.string.web_video_status_found)
+                                + "\n" + displayUrl);
                         btnAnalyze.setVisibility(View.VISIBLE);
                     });
                 }
@@ -339,7 +345,8 @@ public class WebVideoActivity extends AppCompatActivity {
                             String pageUrl = webView.getUrl();
                             if (pageUrl != null) detectedReferer.set(pageUrl);
                             detectedUa.set(DESKTOP_UA);
-                            tvStatus.setText(R.string.web_video_status_found);
+                            tvStatus.setText(getString(R.string.web_video_status_found)
+                                    + "\n" + src);
                             btnAnalyze.setVisibility(View.VISIBLE);
                             Log.i(TAG, "JS 嗅到视频: " + src);
                         }

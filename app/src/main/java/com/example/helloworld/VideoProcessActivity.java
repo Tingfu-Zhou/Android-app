@@ -13,6 +13,8 @@ import android.graphics.Bitmap;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import android.widget.Toast;
+
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -253,8 +255,13 @@ public class VideoProcessActivity extends AppCompatActivity {
             videoFrameExtractor = new VideoFrameExtractor(this, videoUri, httpHeaders);
             Log.d(TAG, "onCreate: VideoFrameExtractor 初始化成功");
         } catch (IOException e) {
-            Log.e(TAG, "onCreate: VideoFrameExtractor 初始化失败", e);
+            Log.e(TAG, "onCreate: VideoFrameExtractor 初始化失败 uri=" + videoUri, e);
+            String msg = isWebVideoMode
+                    ? "无法解析视频流（可能是 HLS m3u8 或 URL 已过期）：" + e.getMessage()
+                    : "视频解析失败：" + e.getMessage();
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
             finish();
+            return;   // ★ 之前缺这一行，finish 之后还会继续跑下面初始化代码
         }
 
         // 设置视频控制器（网页视频模式下没有 seek，跳过 MediaController）
@@ -293,7 +300,19 @@ public class VideoProcessActivity extends AppCompatActivity {
         });
 
         videoView.setOnErrorListener((mp, what, extra) -> {
-            Log.e(TAG, "视频播放出错 what:" + what + " extra:" + extra);
+            Log.e(TAG, "视频播放出错 what:" + what + " extra:" + extra
+                    + " uri=" + (intent.getData() == null ? "null" : intent.getData().toString()));
+            String hint;
+            switch (extra) {
+                case -1004: hint = "IO 错误（403/网络中断）"; break;
+                case -1007: hint = "畸形/不支持的流"; break;
+                case -1010: hint = "不支持的格式"; break;
+                case -110:  hint = "请求超时"; break;
+                default:    hint = "未知错误";
+            }
+            Toast.makeText(this,
+                    "VideoView 播放失败 (what=" + what + ", extra=" + extra + ", " + hint + ")",
+                    Toast.LENGTH_LONG).show();
             return true;
         });
 
