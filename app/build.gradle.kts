@@ -46,6 +46,11 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite:2.13.0")
     // 如果需要更好的权限管理，可以添加（可选）：
     implementation("pub.devrel:easypermissions:3.0.0")
+    // Media3 / ExoPlayer（仅"网页视频"模式使用，离线/在线模式仍走原本的 MediaExtractor 路径）
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+    implementation("androidx.media3:media3-datasource:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
     // 单元测试 & Android 测试
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)

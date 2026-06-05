@@ -56,6 +56,8 @@ public class WebVideoActivity extends AppCompatActivity {
     public static final String EXTRA_HTTP_REFERER = "HTTP_REFERER";
     public static final String EXTRA_HTTP_UA = "HTTP_USER_AGENT";
     public static final String EXTRA_HTTP_COOKIE = "HTTP_COOKIE";
+    /** WebView 里 &lt;video&gt;.currentTime 的当前播放位置（ms），分析页开局 seek 到这里 */
+    public static final String EXTRA_START_POSITION_MS = "START_POSITION_MS";
 
     /** 常见广告/分析域名黑名单。命中即在 shouldInterceptRequest 里返回空响应。 */
     private static final Set<String> AD_HOSTS = new HashSet<>(Arrays.asList(
@@ -161,6 +163,42 @@ public class WebVideoActivity extends AppCompatActivity {
     }
 
     private void launchAnalysis() {
+        if (detectedVideoUrl.get() == null) return;
+
+        // 先异步读 <video>.currentTime，作为分析页开局 seek 位置；不论成功失败都继续往下
+        try {
+            webView.evaluateJavascript(
+                    "(function(){var vs=document.querySelectorAll('video');"
+                            + "for(var i=0;i<vs.length;i++){var v=vs[i];"
+                            + "if(v.currentTime>0)return v.currentTime;}return 0;})()",
+                    value -> {
+                        long startMs = parseCurrentTimeToMs(value);
+                        doLaunchAnalysis(startMs);
+                    });
+        } catch (Exception e) {
+            Log.w(TAG, "evaluateJavascript currentTime 失败，从 0 开始", e);
+            doLaunchAnalysis(0L);
+        }
+    }
+
+    /** 解析 evaluateJavascript 回来的字符串到毫秒。失败一律返回 0。 */
+    private static long parseCurrentTimeToMs(String value) {
+        if (value == null || value.isEmpty() || "null".equalsIgnoreCase(value)) return 0L;
+        // value 可能形如 "12.345" 或带引号 "\"12.345\""
+        String trimmed = value;
+        if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            trimmed = trimmed.substring(1, trimmed.length() - 1);
+        }
+        try {
+            double secs = Double.parseDouble(trimmed);
+            if (Double.isNaN(secs) || secs < 0) return 0L;
+            return (long) (secs * 1000.0);
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    private void doLaunchAnalysis(long startPositionMs) {
         String videoUrl = detectedVideoUrl.get();
         if (videoUrl == null) return;
 
@@ -172,6 +210,7 @@ public class WebVideoActivity extends AppCompatActivity {
         Intent intent = new Intent(this, VideoProcessActivity.class);
         intent.setData(Uri.parse(videoUrl));
         intent.putExtra(EXTRA_IS_WEB_VIDEO, true);
+        intent.putExtra(EXTRA_START_POSITION_MS, startPositionMs);
 
         String referer = detectedReferer.get();
         if (referer != null) intent.putExtra(EXTRA_HTTP_REFERER, referer);
@@ -191,8 +230,12 @@ public class WebVideoActivity extends AppCompatActivity {
 
         Log.i(TAG, "启动 VideoProcessActivity, url=" + videoUrl
                 + ", referer=" + detectedReferer.get()
-                + ", ua=" + ua);
-        Toast.makeText(this, "正在打开分析页…", Toast.LENGTH_SHORT).show();
+                + ", ua=" + ua
+                + ", startMs=" + startPositionMs);
+        String toast = startPositionMs > 0
+                ? "正在打开分析页（从 " + (startPositionMs / 1000) + "s）…"
+                : "正在打开分析页…";
+        Toast.makeText(this, toast, Toast.LENGTH_SHORT).show();
         startActivity(intent);
     }
 
