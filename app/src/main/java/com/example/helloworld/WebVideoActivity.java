@@ -482,11 +482,22 @@ public class WebVideoActivity extends AppCompatActivity {
         String lower = url.toLowerCase(Locale.US);
         int qIdx = lower.indexOf('?');
         String path = qIdx > 0 ? lower.substring(0, qIdx) : lower;
+
+        // HLS / DASH 分片单独都不能播，明确排除掉，避免被下面的容器扩展名误判
+        if (path.endsWith(".ts") || path.endsWith(".m4s")
+                || path.endsWith(".m4a") || path.endsWith(".aac")
+                || path.endsWith(".vtt")) {
+            return false;
+        }
+
+        // 只认完整容器/playlist 的后缀。注意不要再用 contains(".mp4/") 之类的子串，
+        // 因为 Pornhub 这种站把 ".mp4/" 当作目录段在 HLS 分片 URL 里复用，
+        // 会把 ".../X.mp4/seg-N-v1-a1.ts" 误判为视频 URL。
         return path.endsWith(".mp4")
                 || path.endsWith(".m3u8")
                 || path.endsWith(".m3u")
-                || path.contains(".mp4/")
-                || path.contains(".m3u8/");
+                || path.endsWith(".webm")
+                || path.endsWith(".mpd");   // DASH playlist
     }
 
     private static boolean isAdHost(String host) {
