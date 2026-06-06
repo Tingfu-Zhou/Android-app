@@ -516,9 +516,11 @@ public class WebVideoActivity extends AppCompatActivity {
             if (prev == null) {
                 shouldUpdate = true;
             } else if (sameElement) {
-                // 同一元素 src 变了（Pornhub 主播放器从广告切到真视频）
+                // 同一元素 src 变了（Pornhub 主播放器从广告切到真视频），绕过分数比较
                 shouldUpdate = true;
-            } else if (score >= currentBestScore) {
+            } else if (score > currentBestScore) {
+                // 严格大于。相同分数（如多条 network=1）不允许互相覆盖，
+                // 真视频先到先得；这样 missav 主视频 playlist 不会被推荐位的 playlist 顶下去
                 shouldUpdate = true;
             } else {
                 shouldUpdate = false;
@@ -656,6 +658,50 @@ public class WebVideoActivity extends AppCompatActivity {
         return false;
     }
 
+    /**
+     * fragmented MP4 / DASH-CMAF 分片识别。HLS 现在也常用 fMP4 替代 .ts，
+     * 文件名是 .mp4 但只是个 1-2 秒的分片，单独喂给 ExoPlayer 会报
+     * UnrecognizedInputFormatException。
+     *
+     * 典型样本：
+     *   xxx_240p_h264_init_<token>.mp4           ← 初始化段
+     *   xxx_240p_h264_589_<token>_1780755790.mp4 ← 媒体分片（带 codec 标记 + 序号）
+     *   .../seg-15.mp4   .../segment-3.mp4       ← 通用编号分片
+     */
+    private static boolean looksLikeHlsFragment(String url) {
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.US);
+        int qIdx = lower.indexOf('?');
+        String path = qIdx > 0 ? lower.substring(0, qIdx) : lower;
+        if (!path.endsWith(".mp4")) return false;
+
+        int slashIdx = path.lastIndexOf('/');
+        String filename = slashIdx >= 0 ? path.substring(slashIdx + 1) : path;
+
+        // 1) init segment：文件名带 "init"
+        if (filename.contains("init.mp4")
+                || filename.contains("_init_") || filename.contains("-init-")
+                || filename.contains("_init.") || filename.contains("-init.")
+                || filename.startsWith("init.") || filename.startsWith("init-")
+                || filename.startsWith("init_")
+                || filename.contains("initialization")) {
+            return true;
+        }
+
+        // 2) 带 codec 标记 + 数字序号的分片
+        //    e.g. xxx_h264_589_<token>.mp4 / xxx_h265_10.mp4 / xxx_av1_42.mp4
+        if (filename.matches(".*_(h264|h265|hevc|avc|vp9|av01?|aac)_\\d+[._\\-].*\\.mp4")) {
+            return true;
+        }
+
+        // 3) seg-N / segment-N / chunk-N / frag-N / fragment-N 命名
+        if (filename.matches(".*(^|[_\\-/])(seg|segment|chunk|frag|fragment)[_\\-]?\\d+.*\\.mp4")) {
+            return true;
+        }
+
+        return false;
+    }
+
     private static boolean looksLikeVideoUrl(String url) {
         if (url == null) return false;
         String lower = url.toLowerCase(Locale.US);
@@ -668,6 +714,9 @@ public class WebVideoActivity extends AppCompatActivity {
                 || path.endsWith(".vtt")) {
             return false;
         }
+
+        // fragmented MP4 分片（后缀 .mp4 但其实是 HLS/DASH chunk，不能单独播）
+        if (looksLikeHlsFragment(url)) return false;
 
         // 只认完整容器/playlist 的后缀。注意不要再用 contains(".mp4/") 之类的子串，
         // 因为 Pornhub 这种站把 ".mp4/" 当作目录段在 HLS 分片 URL 里复用，
