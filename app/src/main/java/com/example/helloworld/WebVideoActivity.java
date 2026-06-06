@@ -301,7 +301,18 @@ public class WebVideoActivity extends AppCompatActivity {
                 }
 
                 // 2) 视频流嗅探
-                if (looksLikeVideoUrl(reqUrl) && detectedVideoUrl.get() == null) {
+                if (looksLikeVideoUrl(reqUrl)) {
+                    if (looksLikePreviewUrl(reqUrl)) {
+                        Log.d(TAG, "跳过预览/trickplay/缩略图 URL: " + reqUrl);
+                        return null;
+                    }
+
+                    String prev = detectedVideoUrl.get();
+                    if (reqUrl.equals(prev)) {
+                        // 同一个 URL 重复请求（HLS chunk 之类），不刷新 UI
+                        return null;
+                    }
+
                     String referer = null;
                     String ua = null;
                     try {
@@ -323,7 +334,7 @@ public class WebVideoActivity extends AppCompatActivity {
                     detectedUa.set(TextUtils.isEmpty(ua) ? DESKTOP_UA : ua);
                     detectedVideoUrl.set(reqUrl);
 
-                    Log.i(TAG, "嗅到视频流: " + reqUrl);
+                    Log.i(TAG, (prev == null ? "嗅到视频流" : "更新视频流(旧->新)") + ": " + reqUrl);
                     final String displayUrl = reqUrl;
                     runOnUiThread(() -> {
                         tvStatus.setText(getString(R.string.web_video_status_found)
@@ -382,21 +393,88 @@ public class WebVideoActivity extends AppCompatActivity {
                             src = src.substring(1, src.length() - 1);
                         }
                         src = src.replace("\\/", "/");
-                        if (src.startsWith("http") && looksLikeVideoUrl(src)
-                                && detectedVideoUrl.get() == null) {
-                            detectedVideoUrl.set(src);
-                            String pageUrl = webView.getUrl();
-                            if (pageUrl != null) detectedReferer.set(pageUrl);
-                            detectedUa.set(DESKTOP_UA);
-                            tvStatus.setText(getString(R.string.web_video_status_found)
-                                    + "\n" + src);
-                            btnAnalyze.setVisibility(View.VISIBLE);
-                            Log.i(TAG, "JS 嗅到视频: " + src);
+                        if (src.startsWith("http") && looksLikeVideoUrl(src)) {
+                            if (looksLikePreviewUrl(src)) {
+                                Log.d(TAG, "JS 跳过预览/trickplay URL: " + src);
+                            } else {
+                                String prev = detectedVideoUrl.get();
+                                if (!src.equals(prev)) {
+                                    detectedVideoUrl.set(src);
+                                    String pageUrl = webView.getUrl();
+                                    if (pageUrl != null) detectedReferer.set(pageUrl);
+                                    detectedUa.set(DESKTOP_UA);
+                                    tvStatus.setText(getString(R.string.web_video_status_found)
+                                            + "\n" + src);
+                                    btnAnalyze.setVisibility(View.VISIBLE);
+                                    Log.i(TAG, (prev == null ? "JS 嗅到视频" : "JS 更新视频(旧->新)")
+                                            + ": " + src);
+                                }
+                            }
                         }
                     });
         } catch (Exception e) {
             Log.w(TAG, "JS 嗅探异常", e);
         }
+    }
+
+    /**
+     * "预览/trickplay/缩略图条" URL 黑名单。这种 URL 也是 .mp4 / .m3u8 后缀，
+     * 但播放器拉到只有几秒、分辨率极小，不是真视频。
+     *
+     * 触发条件命中任一即跳过：
+     *   1) 子域名暗示：pix- / thumb- / sprite- / preview- / trickplay- 开头
+     *   2) 路径段：/preview/ /thumb/ /sprite/ /storyboard/ /poster/ /trickplay/ /vts:
+     *   3) Pornhub 风格的 vts:数字 标记
+     *   4) Pornhub 风格的 rs:fit:W:H 且 W*H 太小（< 240000 ≈ 600x400 以下）
+     */
+    private static boolean looksLikePreviewUrl(String url) {
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.US);
+
+        // 路径标记
+        if (lower.contains("/vts:") || lower.contains("/vts/")
+                || lower.contains("/preview/") || lower.contains("/thumb/")
+                || lower.contains("/thumbnail/") || lower.contains("/sprite/")
+                || lower.contains("/storyboard/") || lower.contains("/poster/")
+                || lower.contains("/trickplay/") || lower.contains("/seek-thumb/")
+                || lower.contains("?type=preview") || lower.contains("&type=preview")) {
+            return true;
+        }
+
+        // Pornhub 风格 vts:NNN —— vts: 后面跟数字
+        int vtsIdx = lower.indexOf("vts:");
+        if (vtsIdx >= 0 && vtsIdx + 4 < lower.length()
+                && Character.isDigit(lower.charAt(vtsIdx + 4))) {
+            return true;
+        }
+
+        // 子域名暗示
+        try {
+            Uri uri = Uri.parse(url);
+            String host = uri.getHost();
+            if (host != null) {
+                String h = host.toLowerCase(Locale.US);
+                if (h.startsWith("pix-") || h.startsWith("thumb-")
+                        || h.startsWith("sprite-") || h.startsWith("preview-")
+                        || h.startsWith("trickplay-")) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) { }
+
+        // rs:fit:W:H —— 解析 W*H，太小判为预览
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("rs:fit:(\\d+):(\\d+)")
+                .matcher(lower);
+        if (m.find()) {
+            try {
+                long w = Long.parseLong(m.group(1));
+                long h = Long.parseLong(m.group(2));
+                if (w * h > 0 && w * h < 240_000L) return true;
+            } catch (NumberFormatException ignored) { }
+        }
+
+        return false;
     }
 
     private static boolean looksLikeVideoUrl(String url) {

@@ -1349,7 +1349,18 @@ public class VideoProcessActivity extends AppCompatActivity {
         VideoSize size = player.getVideoSize();
         originalWidth = size.width;
         originalHeight = size.height;
-        Log.d(TAG, "[网页视频] 首次 READY，视频尺寸: " + originalWidth + "x" + originalHeight);
+        long duration = player.getDuration();
+        Log.d(TAG, "[网页视频] 首次 READY，尺寸: " + originalWidth + "x" + originalHeight
+                + ", 时长: " + duration + "ms");
+
+        // 哨兵：时长太短（< 60s）八成是 trickplay / 预览 / 广告 trailer，
+        // 真视频几乎不会这么短。弹 Toast 警告，让用户返回重嗅。
+        if (duration > 0 && duration < 60_000L) {
+            Toast.makeText(this,
+                    "视频时长仅 " + (duration / 1000) + " 秒，疑似预览/广告片段。\n"
+                            + "请返回 WebView 等真视频开始播放后再点开始分析。",
+                    Toast.LENGTH_LONG).show();
+        }
 
         // PlayerView 内部用 resize_mode=fit 自动按比例缩放，这里 adjustVideoSize 仅对
         // 离线模式的 VideoView 起作用；为了不动它，给 originalWidth/Height 占位即可
