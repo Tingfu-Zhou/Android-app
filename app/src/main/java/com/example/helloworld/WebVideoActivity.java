@@ -16,6 +16,7 @@ import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -31,6 +32,8 @@ import androidx.appcompat.app.AppCompatActivity;
 import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.textfield.TextInputEditText;
+
+import org.json.JSONObject;
 
 import java.io.ByteArrayInputStream;
 import java.util.Arrays;
@@ -82,6 +85,86 @@ public class WebVideoActivity extends AppCompatActivity {
 
     private static final long JS_POLL_INTERVAL_MS = 2000;
 
+    /**
+     * 注入页面的嗅探 JS。每次 onPageStarted 调一次。
+     *
+     * 做三件事：
+     *  1) hook HTMLMediaElement.prototype.src 的 setter，src 一变就上报；
+     *  2) hook HTMLSourceElement.prototype.src，同理；
+     *  3) 每 1.5 秒扫一遍 DOM，挑出"面积最大 + 正在播 + 非静音"那个 <video>，
+     *     报它的 currentSrc。
+     *
+     * 每个 video 元素分配一个 __sniffId，让 native 端能识别"同一个元素改了 src"
+     * （典型场景：Pornhub 主播放器里广告→真视频）。
+     */
+    private static final String SNIFF_JS =
+            "(function(){\n" +
+            "  if (window.__sniffInstalled) return;\n" +
+            "  window.__sniffInstalled = true;\n" +
+            "  function nextId(){ window.__sniffN=(window.__sniffN||0)+1; return '__el_'+window.__sniffN; }\n" +
+            "  function elInfo(el){\n" +
+            "    if(!el) return {width:0,height:0,paused:true,muted:true,currentTime:0,elementId:''};\n" +
+            "    if(!el.__sniffId) el.__sniffId = nextId();\n" +
+            "    var r = el.getBoundingClientRect();\n" +
+            "    return {width:r.width||0, height:r.height||0,\n" +
+            "            paused: !!el.paused, muted: !!el.muted,\n" +
+            "            currentTime: el.currentTime||0, elementId: el.__sniffId};\n" +
+            "  }\n" +
+            "  function report(url, source, el){\n" +
+            "    try{\n" +
+            "      if(!url || typeof url!=='string') return;\n" +
+            "      if(url.indexOf('http')!==0) return;\n" +
+            "      var info = elInfo(el);\n" +
+            "      info.url = url; info.source = source;\n" +
+            "      window.AndroidVideoSniff.onVideoSrc(JSON.stringify(info));\n" +
+            "    }catch(e){}\n" +
+            "  }\n" +
+            "  function hookSrc(proto, label){\n" +
+            "    try{\n" +
+            "      var d = Object.getOwnPropertyDescriptor(proto, 'src');\n" +
+            "      if(!d || !d.set || !d.get) return;\n" +
+            "      Object.defineProperty(proto, 'src', {\n" +
+            "        configurable: true,\n" +
+            "        get: function(){ return d.get.call(this); },\n" +
+            "        set: function(v){\n" +
+            "          try{\n" +
+            "            var el = this;\n" +
+            "            if(label==='source-src'){ var p=this.parentElement; if(p && p.tagName==='VIDEO') el=p; }\n" +
+            "            report(v, label, el);\n" +
+            "          }catch(e){}\n" +
+            "          return d.set.call(this, v);\n" +
+            "        }\n" +
+            "      });\n" +
+            "    }catch(e){}\n" +
+            "  }\n" +
+            "  hookSrc(HTMLMediaElement.prototype, 'media-src');\n" +
+            "  if(window.HTMLSourceElement) hookSrc(HTMLSourceElement.prototype, 'source-src');\n" +
+            "  function scan(){\n" +
+            "    try{\n" +
+            "      var vs = document.querySelectorAll('video');\n" +
+            "      var best=null, bestScore=0;\n" +
+            "      for(var i=0;i<vs.length;i++){\n" +
+            "        var v = vs[i];\n" +
+            "        var r = v.getBoundingClientRect();\n" +
+            "        if(r.width<200 || r.height<100) continue;\n" +
+            "        if(r.bottom<0 || r.top>window.innerHeight) continue;\n" +
+            "        var area = r.width*r.height;\n" +
+            "        var w = 1;\n" +
+            "        if(!v.paused && v.currentTime>0) w *= 100;\n" +
+            "        if(!v.muted) w *= 10;\n" +
+            "        var s = area*w;\n" +
+            "        if(s>bestScore){ bestScore=s; best=v; }\n" +
+            "      }\n" +
+            "      if(best){\n" +
+            "        var src = best.src || best.currentSrc || '';\n" +
+            "        if(src && src.indexOf('http')===0) report(src, 'dom-scan', best);\n" +
+            "      }\n" +
+            "    }catch(e){}\n" +
+            "  }\n" +
+            "  scan();\n" +
+            "  setInterval(scan, 1500);\n" +
+            "})();";
+
     private WebView webView;
     private TextInputEditText etUrl;
     private MaterialButton btnOpen;
@@ -91,6 +174,11 @@ public class WebVideoActivity extends AppCompatActivity {
     private final AtomicReference<String> detectedVideoUrl = new AtomicReference<>(null);
     private final AtomicReference<String> detectedReferer = new AtomicReference<>(null);
     private final AtomicReference<String> detectedUa = new AtomicReference<>(null);
+
+    /** 嗅探打分 + 来源元素跟踪。所有跨线程读写都走 sniffLock。 */
+    private final Object sniffLock = new Object();
+    private double currentBestScore = 0;
+    private String currentBestElementId = "";
 
     private Handler jsPollHandler;
     private Runnable jsPollRunnable;
@@ -159,6 +247,10 @@ public class WebVideoActivity extends AppCompatActivity {
         detectedVideoUrl.set(null);
         detectedReferer.set(null);
         detectedUa.set(null);
+        synchronized (sniffLock) {
+            currentBestScore = 0;
+            currentBestElementId = "";
+        }
         btnAnalyze.setVisibility(View.GONE);
     }
 
@@ -258,12 +350,17 @@ public class WebVideoActivity extends AppCompatActivity {
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
 
+        // 把 native 桥暴露给页面 JS，对应 SNIFF_JS 里的 AndroidVideoSniff.onVideoSrc(...)
+        webView.addJavascriptInterface(new VideoSniffInterface(), "AndroidVideoSniff");
+
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 // 每次进入新页面都重置嗅探状态
                 resetDetection();
                 tvStatus.setText(R.string.web_video_status_loading);
+                // 尽可能早地把 hook 注入新文档。__sniffInstalled 守卫保证重复注入安全
+                view.evaluateJavascript(SNIFF_JS, null);
             }
 
             @Override
@@ -300,19 +397,9 @@ public class WebVideoActivity extends AppCompatActivity {
                     return blankResponse();
                 }
 
-                // 2) 视频流嗅探
+                // 2) 视频流嗅探 —— 网络层不知道是哪个 <video> 元素发出的请求，
+                //    打最低分（1）作为兜底；只要页面里有 JS 报上更高分的来源，这条就会被压住
                 if (looksLikeVideoUrl(reqUrl)) {
-                    if (looksLikePreviewUrl(reqUrl)) {
-                        Log.d(TAG, "跳过预览/trickplay/缩略图 URL: " + reqUrl);
-                        return null;
-                    }
-
-                    String prev = detectedVideoUrl.get();
-                    if (reqUrl.equals(prev)) {
-                        // 同一个 URL 重复请求（HLS chunk 之类），不刷新 UI
-                        return null;
-                    }
-
                     String referer = null;
                     String ua = null;
                     try {
@@ -322,25 +409,13 @@ public class WebVideoActivity extends AppCompatActivity {
                         }
                     } catch (Exception ignored) { }
 
-                    if (TextUtils.isEmpty(referer)) {
-                        // fallback：用主页 URL
-                        runOnUiThread(() -> {
-                            String pageUrl = webView.getUrl();
-                            if (pageUrl != null) detectedReferer.set(pageUrl);
-                        });
-                    } else {
-                        detectedReferer.set(referer);
-                    }
-                    detectedUa.set(TextUtils.isEmpty(ua) ? DESKTOP_UA : ua);
-                    detectedVideoUrl.set(reqUrl);
-
-                    Log.i(TAG, (prev == null ? "嗅到视频流" : "更新视频流(旧->新)") + ": " + reqUrl);
-                    final String displayUrl = reqUrl;
-                    runOnUiThread(() -> {
-                        tvStatus.setText(getString(R.string.web_video_status_found)
-                                + "\n" + displayUrl);
-                        btnAnalyze.setVisibility(View.VISIBLE);
-                    });
+                    handleSniffedVideo(
+                            reqUrl,
+                            /*score*/ 1.0,
+                            "network",
+                            /*elementId*/ "",
+                            /*networkReferer*/ referer,
+                            /*networkUa*/ ua);
                 }
 
                 // 返回 null = 不拦截，让请求正常进行
@@ -378,9 +453,8 @@ public class WebVideoActivity extends AppCompatActivity {
         });
     }
 
-    /** 周期性查询页面里的 <video> src（覆盖那些走 src 直接挂的简单视频） */
+    /** 老的兜底 JS 轮询，保留是因为有些站点 setInterval 注入失败时还能找回主视频 src。 */
     private void pollDomForVideoSrc() {
-        if (detectedVideoUrl.get() != null) return;
         try {
             webView.evaluateJavascript(
                     "(function(){var vs=document.querySelectorAll('video');for(var i=0;i<vs.length;i++){"
@@ -393,27 +467,134 @@ public class WebVideoActivity extends AppCompatActivity {
                             src = src.substring(1, src.length() - 1);
                         }
                         src = src.replace("\\/", "/");
-                        if (src.startsWith("http") && looksLikeVideoUrl(src)) {
-                            if (looksLikePreviewUrl(src)) {
-                                Log.d(TAG, "JS 跳过预览/trickplay URL: " + src);
-                            } else {
-                                String prev = detectedVideoUrl.get();
-                                if (!src.equals(prev)) {
-                                    detectedVideoUrl.set(src);
-                                    String pageUrl = webView.getUrl();
-                                    if (pageUrl != null) detectedReferer.set(pageUrl);
-                                    detectedUa.set(DESKTOP_UA);
-                                    tvStatus.setText(getString(R.string.web_video_status_found)
-                                            + "\n" + src);
-                                    btnAnalyze.setVisibility(View.VISIBLE);
-                                    Log.i(TAG, (prev == null ? "JS 嗅到视频" : "JS 更新视频(旧->新)")
-                                            + ": " + src);
-                                }
-                            }
+                        if (src.startsWith("http")) {
+                            // 走统一打分入口；这条路径没有元素几何，用最低分作为兜底
+                            handleSniffedVideo(src, /*score*/ 1.0, "fallback-poll",
+                                    /*elementId*/ "", /*networkReferer*/ null, /*networkUa*/ null);
                         }
                     });
         } catch (Exception e) {
             Log.w(TAG, "JS 嗅探异常", e);
+        }
+    }
+
+    /**
+     * 嗅到一个视频 URL 时的统一入口。打分 + 决定要不要覆盖当前已锁定的 URL。
+     *
+     * 来源（source）有：
+     *  - media-src     : 页面里某个 &lt;video&gt;.src = "..." 被赋值
+     *  - source-src    : 页面里某个 &lt;source&gt;.src = "..." 被赋值
+     *  - dom-scan      : in-page setInterval 挑出的"最大正在播放"那个 &lt;video&gt;
+     *  - fallback-poll : native 端 evaluateJavascript 兜底
+     *  - network       : shouldInterceptRequest 抓到（不知道是哪个元素）
+     *
+     * 更新规则：
+     *  - 同一 URL → 跳过
+     *  - 同一 video 元素（同一个 __sniffId）改了 src → 总是更新（典型：Pornhub 广告→真视频）
+     *  - 新 URL 分数 &gt;= 当前最高 → 更新
+     *  - 其它情况 → 跳过
+     */
+    private void handleSniffedVideo(String url, double score, String source,
+                                    String elementId,
+                                    String networkReferer, String networkUa) {
+        if (!looksLikeVideoUrl(url)) return;
+        if (looksLikePreviewUrl(url)) {
+            Log.d(TAG, "跳过预览/trickplay URL (" + source + "): " + url);
+            return;
+        }
+
+        boolean shouldUpdate;
+        double prevScore;
+        synchronized (sniffLock) {
+            String prev = detectedVideoUrl.get();
+            if (url.equals(prev)) return;   // 同一 URL 不重复
+
+            prevScore = currentBestScore;
+            boolean sameElement = elementId != null && !elementId.isEmpty()
+                    && elementId.equals(currentBestElementId);
+
+            if (prev == null) {
+                shouldUpdate = true;
+            } else if (sameElement) {
+                // 同一元素 src 变了（Pornhub 主播放器从广告切到真视频），绕过分数比较
+                shouldUpdate = true;
+            } else if (score > currentBestScore) {
+                // 严格大于。相同分数（如多条 network=1）不允许互相覆盖，
+                // 真视频先到先得；这样 missav 主视频 playlist 不会被推荐位的 playlist 顶下去
+                shouldUpdate = true;
+            } else {
+                shouldUpdate = false;
+            }
+
+            if (shouldUpdate) {
+                currentBestScore = score;
+                currentBestElementId = elementId == null ? "" : elementId;
+                detectedVideoUrl.set(url);
+
+                if (networkReferer != null && !networkReferer.isEmpty()) {
+                    detectedReferer.set(networkReferer);
+                } else if (detectedReferer.get() == null) {
+                    String pageUrl = webView.getUrl();
+                    if (pageUrl != null) detectedReferer.set(pageUrl);
+                }
+                if (networkUa != null && !networkUa.isEmpty()) {
+                    detectedUa.set(networkUa);
+                } else if (detectedUa.get() == null) {
+                    detectedUa.set(DESKTOP_UA);
+                }
+            }
+        }
+
+        if (shouldUpdate) {
+            Log.i(TAG, String.format("更新视频流 (score=%d, %s): %s",
+                    (long) score, source, url));
+            final String finalUrl = url;
+            final String finalSource = source;
+            final long finalScore = (long) score;
+            runOnUiThread(() -> {
+                tvStatus.setText(getString(R.string.web_video_status_found)
+                        + " [" + finalSource + ", score=" + finalScore + "]\n" + finalUrl);
+                btnAnalyze.setVisibility(View.VISIBLE);
+            });
+        } else {
+            Log.d(TAG, String.format("跳过低分 URL (score=%d < %d, %s): %s",
+                    (long) score, (long) prevScore, source, url));
+        }
+    }
+
+    /** WebView 暴露给页面 JS 的桥，对应 SNIFF_JS 里的 AndroidVideoSniff.onVideoSrc(...) */
+    private class VideoSniffInterface {
+        @JavascriptInterface
+        public void onVideoSrc(String json) {
+            if (json == null) return;
+            try {
+                JSONObject o = new JSONObject(json);
+                String url = o.optString("url", "");
+                String source = o.optString("source", "unknown");
+                double width = o.optDouble("width", 0);
+                double height = o.optDouble("height", 0);
+                boolean paused = o.optBoolean("paused", true);
+                boolean muted = o.optBoolean("muted", true);
+                double currentTime = o.optDouble("currentTime", 0);
+                String elementId = o.optString("elementId", "");
+
+                double area = width * height;
+                if (area < 200 * 100) {
+                    // 元素太小，必是侧栏 / hover 缩略图，直接丢
+                    Log.d(TAG, "跳过太小元素 (" + (long) width + "x" + (long) height
+                            + ", " + source + "): " + url);
+                    return;
+                }
+
+                double weight = 1.0;
+                if (!paused && currentTime > 0) weight *= 100.0;   // 正在播
+                if (!muted) weight *= 10.0;                        // 有声音（推荐位多半静音）
+                double score = area * weight;
+
+                handleSniffedVideo(url, score, source, elementId, null, null);
+            } catch (Exception e) {
+                Log.w(TAG, "VideoSniffInterface.onVideoSrc 解析失败: " + json, e);
+            }
         }
     }
 
@@ -477,6 +658,50 @@ public class WebVideoActivity extends AppCompatActivity {
         return false;
     }
 
+    /**
+     * fragmented MP4 / DASH-CMAF 分片识别。HLS 现在也常用 fMP4 替代 .ts，
+     * 文件名是 .mp4 但只是个 1-2 秒的分片，单独喂给 ExoPlayer 会报
+     * UnrecognizedInputFormatException。
+     *
+     * 典型样本：
+     *   xxx_240p_h264_init_<token>.mp4           ← 初始化段
+     *   xxx_240p_h264_589_<token>_1780755790.mp4 ← 媒体分片（带 codec 标记 + 序号）
+     *   .../seg-15.mp4   .../segment-3.mp4       ← 通用编号分片
+     */
+    private static boolean looksLikeHlsFragment(String url) {
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.US);
+        int qIdx = lower.indexOf('?');
+        String path = qIdx > 0 ? lower.substring(0, qIdx) : lower;
+        if (!path.endsWith(".mp4")) return false;
+
+        int slashIdx = path.lastIndexOf('/');
+        String filename = slashIdx >= 0 ? path.substring(slashIdx + 1) : path;
+
+        // 1) init segment：文件名带 "init"
+        if (filename.contains("init.mp4")
+                || filename.contains("_init_") || filename.contains("-init-")
+                || filename.contains("_init.") || filename.contains("-init.")
+                || filename.startsWith("init.") || filename.startsWith("init-")
+                || filename.startsWith("init_")
+                || filename.contains("initialization")) {
+            return true;
+        }
+
+        // 2) 带 codec 标记 + 数字序号的分片
+        //    e.g. xxx_h264_589_<token>.mp4 / xxx_h265_10.mp4 / xxx_av1_42.mp4
+        if (filename.matches(".*_(h264|h265|hevc|avc|vp9|av01?|aac)_\\d+[._\\-].*\\.mp4")) {
+            return true;
+        }
+
+        // 3) seg-N / segment-N / chunk-N / frag-N / fragment-N 命名
+        if (filename.matches(".*(^|[_\\-/])(seg|segment|chunk|frag|fragment)[_\\-]?\\d+.*\\.mp4")) {
+            return true;
+        }
+
+        return false;
+    }
+
     private static boolean looksLikeVideoUrl(String url) {
         if (url == null) return false;
         String lower = url.toLowerCase(Locale.US);
@@ -489,6 +714,9 @@ public class WebVideoActivity extends AppCompatActivity {
                 || path.endsWith(".vtt")) {
             return false;
         }
+
+        // fragmented MP4 分片（后缀 .mp4 但其实是 HLS/DASH chunk，不能单独播）
+        if (looksLikeHlsFragment(url)) return false;
 
         // 只认完整容器/playlist 的后缀。注意不要再用 contains(".mp4/") 之类的子串，
         // 因为 Pornhub 这种站把 ".mp4/" 当作目录段在 HLS 分片 URL 里复用，
