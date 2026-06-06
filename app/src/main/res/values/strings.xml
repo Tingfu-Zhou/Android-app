@@ -33,6 +33,6 @@
     <string name="online_orientation_tip_title">推荐观看方式</string>
     <string name="online_orientation_tip_body">建议将手机横屏并全屏播放视频，识别效果最佳。</string>
     <string name="online_browser_notice_title">温馨提示</string>
-    <string name="online_browser_notice_body">部分浏览器（如 Chrome、Firefox）出于安全考虑，会自动将屏幕共享中的视频画面遮黑，并显示 “为了安全起见，屏幕共享画面已隐藏此应用的内容” 等提示。\n\n为了保证分析的准确性，录屏模式建议使用对应视频网站的官方 App 直接观看视频。</string>
+    <string name="online_browser_notice_body">部分浏览器（如 Chrome、Firefox）出于安全考虑，会自动将屏幕共享中的视频画面遮黑，并显示 “为了安全起见，屏幕共享画面已隐藏此应用的内容” 等提示。\n\n为了保证分析的准确性，录屏模式建议使用对应视频网站的官方 App 直接观看视频(部分app会禁止屏幕/音频抓取)。</string>
     <string name="online_exit_tip">如需退出在线分析，可点击屏幕上方通知栏 “屏幕共享 共享中” ，并点击停止按钮。</string>
 </resources>
