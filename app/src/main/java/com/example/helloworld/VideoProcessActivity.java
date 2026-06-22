@@ -39,6 +39,7 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
 import androidx.media3.common.util.UnstableApi;
+import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.PlayerView;
 
@@ -1325,9 +1326,24 @@ public class VideoProcessActivity extends AppCompatActivity {
             @Override
             public void onPlayerError(PlaybackException error) {
                 Log.e(TAG, "[网页视频] ExoPlayer 错误 code=" + error.errorCode, error);
+
+                // HTTP 层错误（典型：CDN 防盗链 403）把细节打出来，方便定位到底缺什么头
+                String hint = "";
+                Throwable cause = error.getCause();
+                if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
+                    HttpDataSource.InvalidResponseCodeException http =
+                            (HttpDataSource.InvalidResponseCodeException) cause;
+                    Log.e(TAG, "[网页视频] HTTP " + http.responseCode
+                            + " url=" + http.dataSpec.uri
+                            + "\n  请求头(per-request)=" + http.dataSpec.httpRequestHeaders.keySet()
+                            + "\n  响应头=" + http.headerFields);
+                    hint = http.responseCode == 403
+                            ? "（被 CDN 拒绝 403：防盗链校验未通过或视频已下架）"
+                            : "（HTTP " + http.responseCode + "）";
+                }
+
                 Toast.makeText(VideoProcessActivity.this,
-                        "网页视频播放失败: " + error.getErrorCodeName()
-                                + (error.getMessage() == null ? "" : " - " + error.getMessage()),
+                        "网页视频播放失败: " + error.getErrorCodeName() + hint,
                         Toast.LENGTH_LONG).show();
             }
         });

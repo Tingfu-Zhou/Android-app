@@ -1,6 +1,7 @@
 package com.example.helloworld;
 
 import android.content.Context;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -80,9 +81,27 @@ public class ExoPlayerEngine {
             if (ua != null && !ua.isEmpty()) {
                 httpFactory.setUserAgent(ua);
             }
+
+            // 关键：把请求伪装成"浏览器里页面发起的跨站拉流"。
+            // 像 missav 的 CDN（surrit.com）这类防盗链升级后会校验 Referer/Origin：
+            //   - 浏览器跨站请求按默认 referrer-policy 只发 origin（https://host/），不发完整路径
+            //   - hls.js 用 XHR/fetch 拉流，浏览器会自动带 Origin 头
+            // 之前我们只发了"完整路径的 Referer"且没有 Origin，CDN 收紧校验后直接 403。
+            // 这里据 Referer 反推 origin：Referer 归一化成 origin 形式，并补一个 Origin 头。
+            // 对不校验这俩的站（如 Pornhub）是无害的——浏览器本来也是这么发的。
+            String origin = originOf(reqProps.get("Referer"));
+            if (origin != null) {
+                reqProps.put("Referer", origin + "/");
+                if (!reqProps.containsKey("Origin")) {
+                    reqProps.put("Origin", origin);
+                }
+            }
+
             if (!reqProps.isEmpty()) {
                 httpFactory.setDefaultRequestProperties(reqProps);
             }
+            Log.d(TAG, "网页视频 HTTP 头: " + reqProps.keySet()
+                    + (origin != null ? " (origin=" + origin + ")" : ""));
         }
 
         DefaultMediaSourceFactory mediaSourceFactory =
@@ -146,6 +165,30 @@ public class ExoPlayerEngine {
                 Log.w(TAG, "release", e);
             }
             player = null;
+        }
+    }
+
+    /**
+     * 从一个完整 URL 反推出 origin（scheme://host[:port]）。
+     * 用来把 Referer 归一化成浏览器跨站请求的形式，并据此补 Origin 头。
+     * 默认端口（http:80 / https:443）不写出。解析失败返回 null。
+     */
+    private static String originOf(String url) {
+        if (url == null || url.isEmpty()) return null;
+        try {
+            Uri u = Uri.parse(url);
+            String scheme = u.getScheme();
+            String host = u.getHost();
+            if (scheme == null || host == null) return null;
+            StringBuilder sb = new StringBuilder(scheme).append("://").append(host);
+            int port = u.getPort();
+            boolean defaultPort = (port < 0)
+                    || ("https".equals(scheme) && port == 443)
+                    || ("http".equals(scheme) && port == 80);
+            if (!defaultPort) sb.append(':').append(port);
+            return sb.toString();
+        } catch (Exception e) {
+            return null;
         }
     }
 }
