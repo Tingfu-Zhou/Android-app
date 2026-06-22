@@ -312,10 +312,16 @@ public class WebVideoActivity extends AppCompatActivity {
         intent.putExtra(EXTRA_HTTP_UA, ua);
 
         try {
+            // surrit.com（missav CDN）在 Cloudflare 后面，靠 __cf_bm 这类 cookie 区分人/机。
+            // WebView 是真浏览器、已经过了 Cloudflare 校验并拿到了 cookie；把它带给 ExoPlayer，
+            // 让重放请求尽量"接得上"那个已被放行的会话。flush 一下确保读到最新写入的 cookie。
+            CookieManager.getInstance().flush();
             String cookie = CookieManager.getInstance().getCookie(videoUrl);
             if (!TextUtils.isEmpty(cookie)) {
                 intent.putExtra(EXTRA_HTTP_COOKIE, cookie);
             }
+            Log.i(TAG, "网页视频 Cookie for " + Uri.parse(videoUrl).getHost() + ": "
+                    + (TextUtils.isEmpty(cookie) ? "<空>（没抓到 __cf_bm，cookie 重放这条路走不通）" : cookie));
         } catch (Exception e) {
             Log.w(TAG, "读取 Cookie 失败", e);
         }

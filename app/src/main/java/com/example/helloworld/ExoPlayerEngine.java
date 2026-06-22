@@ -92,10 +92,16 @@ public class ExoPlayerEngine {
             String origin = originOf(reqProps.get("Referer"));
             if (origin != null) {
                 reqProps.put("Referer", origin + "/");
-                if (!reqProps.containsKey("Origin")) {
-                    reqProps.put("Origin", origin);
-                }
+                putIfAbsent(reqProps, "Origin", origin);
             }
+
+            // 再贴近 hls.js 的跨站 fetch：补一组标准浏览器头，抬高 Cloudflare 的"像浏览器"评分。
+            // 注意别手动设 Accept-Encoding——交给底层处理 gzip 透明解压。
+            putIfAbsent(reqProps, "Accept", "*/*");
+            putIfAbsent(reqProps, "Accept-Language", "en-US,en;q=0.9");
+            putIfAbsent(reqProps, "Sec-Fetch-Dest", "empty");
+            putIfAbsent(reqProps, "Sec-Fetch-Mode", "cors");
+            putIfAbsent(reqProps, "Sec-Fetch-Site", "cross-site");
 
             if (!reqProps.isEmpty()) {
                 httpFactory.setDefaultRequestProperties(reqProps);
@@ -166,6 +172,10 @@ public class ExoPlayerEngine {
             }
             player = null;
         }
+    }
+
+    private static void putIfAbsent(Map<String, String> map, String key, String value) {
+        if (!map.containsKey(key)) map.put(key, value);
     }
 
     /**
