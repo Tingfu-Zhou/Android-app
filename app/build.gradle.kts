@@ -51,6 +51,12 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
     implementation("androidx.media3:media3-datasource:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
+    // Cronet 数据源：让网页视频模式的 ExoPlayer 用 Chromium 网络栈拉流，
+    // TLS/HTTP 指纹与 WebView 一致，过 missav CDN（surrit.com）的 Cloudflare 机器人校验。
+    // cronet-embedded 内嵌 Chromium 网络栈（约 +8MB），不依赖 Google Play 服务，任何设备可用。
+    implementation("androidx.media3:media3-datasource-cronet:1.4.1")
+    // 版本对齐 media3-datasource-cronet 依赖的 cronet-api，避免版本冲突/重复类。
+    implementation("org.chromium.net:cronet-embedded:113.5672.61")
     // 单元测试 & Android 测试
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)

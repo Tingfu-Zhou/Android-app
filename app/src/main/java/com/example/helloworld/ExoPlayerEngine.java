@@ -13,14 +13,20 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.HttpDataSource;
+import androidx.media3.datasource.cronet.CronetDataSource;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.audio.AudioSink;
 import androidx.media3.exoplayer.audio.DefaultAudioSink;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 
+import org.chromium.net.CronetEngine;
+
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 /**
  * "网页视频"模式专用播放器引擎。
@@ -37,6 +43,11 @@ import java.util.Map;
 @OptIn(markerClass = UnstableApi.class)
 public class ExoPlayerEngine {
     private static final String TAG = "ExoPlayerEngine";
+
+    /** Cronet 引擎/执行器进程内复用：构建开销大，且单例可避免多实例的生命周期问题。 */
+    private static volatile CronetEngine sCronetEngine;
+    private static volatile boolean sCronetInitTried;
+    private static volatile Executor sCronetExecutor;
 
     private ExoPlayer player;
     private final PcmCaptureAudioProcessor pcmCapture;
@@ -69,45 +80,57 @@ public class ExoPlayerEngine {
             }
         };
 
-        // HTTP 数据源工厂，带嗅探阶段拿到的 headers
-        DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
-                .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(15_000)
-                .setReadTimeoutMs(15_000);
-
+        // ===== HTTP 数据源 =====
+        // 先把要发的 UA / 请求头都算出来，再决定底层用 Cronet 还是默认实现。
+        String ua = null;
+        Map<String, String> reqProps = new HashMap<>();
         if (httpHeaders != null && !httpHeaders.isEmpty()) {
-            Map<String, String> reqProps = new HashMap<>(httpHeaders);
-            String ua = reqProps.remove("User-Agent");
-            if (ua != null && !ua.isEmpty()) {
-                httpFactory.setUserAgent(ua);
-            }
+            reqProps.putAll(httpHeaders);
+            ua = reqProps.remove("User-Agent");
 
-            // 关键：把请求伪装成"浏览器里页面发起的跨站拉流"。
-            // 像 missav 的 CDN（surrit.com）这类防盗链升级后会校验 Referer/Origin：
-            //   - 浏览器跨站请求按默认 referrer-policy 只发 origin（https://host/），不发完整路径
-            //   - hls.js 用 XHR/fetch 拉流，浏览器会自动带 Origin 头
-            // 之前我们只发了"完整路径的 Referer"且没有 Origin，CDN 收紧校验后直接 403。
-            // 这里据 Referer 反推 origin：Referer 归一化成 origin 形式，并补一个 Origin 头。
-            // 对不校验这俩的站（如 Pornhub）是无害的——浏览器本来也是这么发的。
+            // 把请求伪装成"浏览器里页面发起的跨站拉流"：origin 形式的 Referer + Origin 头。
+            // hls.js 用 XHR/fetch 拉流，浏览器会自动带 Origin，且跨站默认只发 origin 形式 Referer。
             String origin = originOf(reqProps.get("Referer"));
             if (origin != null) {
                 reqProps.put("Referer", origin + "/");
                 putIfAbsent(reqProps, "Origin", origin);
             }
-
-            // 再贴近 hls.js 的跨站 fetch：补一组标准浏览器头，抬高 Cloudflare 的"像浏览器"评分。
-            // 注意别手动设 Accept-Encoding——交给底层处理 gzip 透明解压。
+            // 贴近 hls.js 的跨站 fetch：补一组标准浏览器头（别手动设 Accept-Encoding，交给底层透明解压）。
             putIfAbsent(reqProps, "Accept", "*/*");
             putIfAbsent(reqProps, "Accept-Language", "en-US,en;q=0.9");
             putIfAbsent(reqProps, "Sec-Fetch-Dest", "empty");
             putIfAbsent(reqProps, "Sec-Fetch-Mode", "cors");
             putIfAbsent(reqProps, "Sec-Fetch-Site", "cross-site");
+        }
 
-            if (!reqProps.isEmpty()) {
-                httpFactory.setDefaultRequestProperties(reqProps);
-            }
-            Log.d(TAG, "网页视频 HTTP 头: " + reqProps.keySet()
-                    + (origin != null ? " (origin=" + origin + ")" : ""));
+        // 默认实现（HttpURLConnection）。既是 Cronet 不可用时的兜底，
+        // 也作为 Cronet 处理不了某个请求时的 fallbackFactory。
+        DefaultHttpDataSource.Factory defaultHttpFactory = new DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(15_000);
+
+        // 优先 Cronet：它就是 Chromium 的网络栈，TLS/HTTP 指纹与 WebView 一致，
+        // 能过 missav 的 CDN（surrit.com）那层 Cloudflare 机器人校验。引擎进程内复用。
+        HttpDataSource.Factory httpFactory;
+        CronetEngine cronetEngine = getCronetEngine(context);
+        if (cronetEngine != null) {
+            CronetDataSource.Factory cronetFactory =
+                    new CronetDataSource.Factory(cronetEngine, getCronetExecutor())
+                            .setConnectionTimeoutMs(15_000)
+                            .setReadTimeoutMs(15_000)
+                            .setHandleSetCookieRequests(true)   // 处理 Cloudflare 重定向里 Set-Cookie 的 __cf_bm
+                            .setFallbackFactory(defaultHttpFactory);
+            if (ua != null && !ua.isEmpty()) cronetFactory.setUserAgent(ua);
+            if (!reqProps.isEmpty()) cronetFactory.setDefaultRequestProperties(reqProps);
+            httpFactory = cronetFactory;
+            Log.d(TAG, "网页视频数据源: Cronet（Chromium 网络栈）, 头=" + reqProps.keySet());
+        } else {
+            if (ua != null && !ua.isEmpty()) defaultHttpFactory.setUserAgent(ua);
+            if (!reqProps.isEmpty()) defaultHttpFactory.setDefaultRequestProperties(reqProps);
+            httpFactory = defaultHttpFactory;
+            Log.w(TAG, "网页视频数据源: DefaultHttpDataSource（Cronet 不可用，CDN 可能 403）, 头="
+                    + reqProps.keySet());
         }
 
         DefaultMediaSourceFactory mediaSourceFactory =
@@ -176,6 +199,37 @@ public class ExoPlayerEngine {
 
     private static void putIfAbsent(Map<String, String> map, String key, String value) {
         if (!map.containsKey(key)) map.put(key, value);
+    }
+
+    /**
+     * 进程内单例 CronetEngine（内嵌 Chromium 网络栈）。构建失败返回 null，调用方回退默认实现。
+     * 用 applicationContext 避免静态字段泄漏 Activity。只尝试构建一次，失败后不反复重试。
+     */
+    private static CronetEngine getCronetEngine(Context context) {
+        if (sCronetEngine == null && !sCronetInitTried) {
+            synchronized (ExoPlayerEngine.class) {
+                if (!sCronetInitTried) {
+                    sCronetInitTried = true;
+                    try {
+                        sCronetEngine = new CronetEngine.Builder(context.getApplicationContext())
+                                .enableHttp2(true)
+                                .build();
+                        Log.d(TAG, "Cronet 引擎已构建: " + sCronetEngine.getVersionString());
+                    } catch (Throwable t) {
+                        Log.w(TAG, "Cronet 引擎构建失败，网页视频将回退 DefaultHttpDataSource", t);
+                    }
+                }
+            }
+        }
+        return sCronetEngine;
+    }
+
+    /** Cronet 回调用的单线程执行器（进程内复用）。 */
+    private static synchronized Executor getCronetExecutor() {
+        if (sCronetExecutor == null) {
+            sCronetExecutor = Executors.newSingleThreadExecutor();
+        }
+        return sCronetExecutor;
     }
 
     /**
