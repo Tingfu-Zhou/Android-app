@@ -202,9 +202,23 @@ app/src/main/assets/
 - 不要提交无权公开的视频、音频、训练数据、密钥、签名文件或设备唯一标识。
 - 对涉及线程、Seek、暂停恢复或 BLE 状态机的改动补充真机测试结果。
 
+
+## 蓝牙协议
+
+本项目通过 BLE 与 Xcup 硬件进行通信。关于第一批 Xcup 硬件使用的 BLE 通信协议、相关资料与参考实现，请参阅：
+
+* [Xcup Bluetooth Protocol](https://github.com/Tingfu-Zhou/Xcup-Bluetooth-protocol)
+
+不同硬件批次或固件版本使用的协议可能存在差异。进行硬件适配时，请以目标设备的实际固件和协议版本为准。
+
 ## 许可证
 
-Apache License 2
+本项目源代码采用 [Apache License 2.0](LICENSE) 开源。你可以在遵守许可证条款的前提下使用、修改和分发本项目代码，包括将其用于商业项目。
+
+第三方依赖、预训练模型、自定义模型权重、训练数据及其他资源不一定适用 Apache License 2.0，应分别遵守其各自的许可证和使用条款。
+
+Apache License 2.0 不授予对 Xcup 名称、商标、产品图片、Logo 或其他品牌资产的使用权。
+
 
 ## 致谢
 
