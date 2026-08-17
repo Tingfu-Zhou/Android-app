@@ -73,19 +73,17 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private final ArrayDeque<Bitmap> frameWindow = new ArrayDeque<>();
     private static final int FRAME_WINDOW_SIZE = VideoClassifierHelper.NUM_FRAMES;
 
-    // 视频推理步长：每 1000ms 推理一次
+    // 视频推理步长：每 500ms 推理一次（与离线模式 VideoProcessActivity 保持一致）
     private long lastVideoInferenceTime = 0;
-    private static final long VIDEO_INFERENCE_INTERVAL = 1000;
+    private static final long VIDEO_INFERENCE_INTERVAL = 500;
 
-    // 视频动作置信度阈值：低于阈值判为 unclear（无效输出）
-    // normal_plot(不转) 用 0.5；oral/sex(转) 用 0.75
-    private static final float VIDEO_THRESHOLD_NORMAL = 0.5f;
-    private static final float VIDEO_THRESHOLD_ACTION = 0.75f;
-
-    // 音频动作置信度阈值：低于阈值判为 unclear（无效输出）
-    // sex/oral(转) 用 0.5；noise(不转) 用 0.6
-    private static final float AUDIO_THRESHOLD_ACTION = 0.5f;
-    private static final float AUDIO_THRESHOLD_NOISE = 0.6f;
+    // [分组概率决策] 下游只关心“转/不转”，在 oral+sex 合并后的概率上做判定，
+    // 避免转场期“总证据充分但单类不过线”被误判为 unclear（与离线模式一致）。
+    // P(do) = P(oral)+P(sex) >= DO 阈值 -> "do"；P(plot/noise) >= 阈值 -> "Noise"；其余 -> unclear
+    private static final float VIDEO_DO_PROB_THRESHOLD = 0.65f;
+    private static final float VIDEO_PLOT_PROB_THRESHOLD = 0.60f;
+    private static final float AUDIO_DO_PROB_THRESHOLD = 0.55f;
+    private static final float AUDIO_NOISE_PROB_THRESHOLD = 0.60f;
 
     // 音频缓冲 - 使用统一的PcmCircularBuffer
     private PcmCircularBuffer pcmBuffer;
@@ -97,7 +95,18 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private final Object frameLock = new Object();
 
     // 时间窗口平滑相关变量
-    private static final int SMOOTH_WINDOW_SIZE = 10;
+    // [延迟优化] 窗口从 10 收缩到 6：融合循环现为 500ms 一次，6 条记录约覆盖 3 秒。
+    // 稳定性保护统一交给 updateBluetoothState 的状态机（与离线模式一致）。
+    private static final int SMOOTH_WINDOW_SIZE = 6;
+    // 动作在窗口内至少出现的次数（音视频各计一次），低于该次数不参与投票
+    private static final int SMOOTH_MIN_COUNT = 3;
+    // [快通道] 音视频同一 tick 一致且双双高置信度时，绕过投票直接输出
+    private static final float FUSION_FASTPATH_VIDEO_CONF = 0.70f;
+    private static final float FUSION_FASTPATH_AUDIO_CONF = 0.70f;
+    // [假启动抑制] 音频单独不能立即启动旋转（参数与离线模式一致）
+    private static final float VIDEO_PLOT_VETO_CONF = 0.70f;
+    private static final int AUDIO_ONLY_START_TICKS = 3;
+    private int audioOnlyDoStreak = 0; // 连续纯音频 do 的融合 tick 计数（仅主线程融合循环访问）
     private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
     private final Object historyLock = new Object();
 
@@ -124,7 +133,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private int lastSentLevel = 0;                  // NEW: 记录上次发送出去的档位
 
     // 主线程融合循环间隔
-    private static final long MAIN_FUSION_INTERVAL = 1000;
+    // [延迟优化] 1000 -> 500：蓝牙实际发送频率仍由状态机节流（与离线模式一致）
+    private static final long MAIN_FUSION_INTERVAL = 500;
     // 视频线程间隔（帧缓存间隔 250ms）
     private static final long VIDEO_LOOP_INTERVAL_MS = 250;
     //音频线程间隔
@@ -439,39 +449,33 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     }
 
     /**
-     * 将三分类结果映射为视频动作并写入共享结果。
-     * 0 normal_plot -> "Noise"（不转）；1 oral / 2 sex -> "do"（转）；
-     * 置信度低于阈值 -> unclear -> ""（置信度 0）。
+     * 将三分类结果映射为视频动作并写入共享结果（分组概率决策）。
+     * P(do)=P(oral)+P(sex) >= 阈值 -> "do"（转）；P(plot) >= 阈值 -> "Noise"（不转）；
+     * 其余 -> unclear -> ""（置信度 0）。置信度取分组后的概率。
      */
     private void applyVideoResult(VideoClassifierHelper.Result result) {
         String actionClass;
         float confidence;
 
-        if (result == null || result.index < 0) {
+        if (result == null || result.index < 0 || result.probs == null || result.probs.length < 3) {
             actionClass = "";
             confidence = 0f;
             Log.w(TAG, "[同步分析] [视频线程] 推理结果无效，判为 unclear");
-        } else if (result.index == 0) {
-            // normal_plot：置信度阈值 0.5
-            if (result.confidence < VIDEO_THRESHOLD_NORMAL) {
-                actionClass = "";
-                confidence = 0f;
-                Log.d(TAG, String.format("[同步分析] [视频线程] normal_plot 置信度 %.2f < 阈值 %.2f，判为 unclear",
-                        result.confidence, VIDEO_THRESHOLD_NORMAL));
-            } else {
-                actionClass = "Noise";   // 不转
-                confidence = result.confidence;
-            }
         } else {
-            // oral / sex：置信度阈值 0.75
-            if (result.confidence < VIDEO_THRESHOLD_ACTION) {
+            float pPlot = result.probs[0];
+            float pDo = result.probs[1] + result.probs[2]; // oral + sex 合并为“转”的总证据
+
+            if (pDo >= VIDEO_DO_PROB_THRESHOLD) {
+                actionClass = "do";      // 转
+                confidence = pDo;
+            } else if (pPlot >= VIDEO_PLOT_PROB_THRESHOLD) {
+                actionClass = "Noise";   // 不转
+                confidence = pPlot;
+            } else {
                 actionClass = "";
                 confidence = 0f;
-                Log.d(TAG, String.format("[同步分析] [视频线程] oral/sex 置信度 %.2f < 阈值 %.2f，判为 unclear",
-                        result.confidence, VIDEO_THRESHOLD_ACTION));
-            } else {
-                actionClass = "do";   // 转
-                confidence = result.confidence;
+                Log.d(TAG, String.format("[同步分析] [视频线程] P(do)=%.2f / P(plot)=%.2f 均未过阈值，判为 unclear",
+                        pDo, pPlot));
             }
         }
 
@@ -535,34 +539,29 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                             //Log.d(TAG, "[计时] 音频推理耗时: " + (tAudioInferEnd - tAudioInferStart) + " ms");
 
                             // 音频模型类别: 0=sex(做爱), 1=oral(口交), 2=noise(杂音)
-                            // sex/oral -> "do"(转); noise -> "Noise"(不转); 低于各自阈值 -> ""(unclear)
-                            int index = result.index;
-                            float confidence = result.confidence;
-
+                            // [分组概率决策] P(do)=P(sex)+P(oral) >= 阈值 -> "do"(转);
+                            // P(noise) >= 阈值 -> "Noise"(不转); 其余 -> ""(unclear)
                             String action;
-                            if (index < 0) {
+                            float confidence;
+                            if (result.index < 0 || result.probs.length < 3) {
                                 action = "";
                                 confidence = 0f;
                                 Log.w(TAG, "[同步分析] [音频线程] 推理结果无效，判为 unclear");
-                            } else if (index == 2) {
-                                // noise：置信度阈值 0.6
-                                if (confidence < AUDIO_THRESHOLD_NOISE) {
-                                    action = "";
-                                    confidence = 0f;
-                                    Log.d(TAG, String.format("[同步分析] [音频线程] noise 置信度 %.2f < 阈值 %.2f，判为 unclear",
-                                            result.confidence, AUDIO_THRESHOLD_NOISE));
-                                } else {
-                                    action = "Noise";   // 不转
-                                }
                             } else {
-                                // sex / oral：置信度阈值 0.5
-                                if (confidence < AUDIO_THRESHOLD_ACTION) {
+                                float pDo = result.probs[0] + result.probs[1]; // sex + oral 合并
+                                float pNoise = result.probs[2];
+
+                                if (pDo >= AUDIO_DO_PROB_THRESHOLD) {
+                                    action = "do";      // 转
+                                    confidence = pDo;
+                                } else if (pNoise >= AUDIO_NOISE_PROB_THRESHOLD) {
+                                    action = "Noise";   // 不转
+                                    confidence = pNoise;
+                                } else {
                                     action = "";
                                     confidence = 0f;
-                                    Log.d(TAG, String.format("[同步分析] [音频线程] sex/oral 置信度 %.2f < 阈值 %.2f，判为 unclear",
-                                            result.confidence, AUDIO_THRESHOLD_ACTION));
-                                } else {
-                                    action = "do";   // 转
+                                    Log.d(TAG, String.format("[同步分析] [音频线程] P(do)=%.2f / P(noise)=%.2f 均未过阈值，判为 unclear",
+                                            pDo, pNoise));
                                 }
                             }
 
@@ -652,17 +651,13 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     Log.d(TAG, "[融合] 音频结果过期（" + audioAge + "ms），已忽略");
                 }
 
-                // 动作类型归一化："oral" 统一处理为 "do"
-                if ("oral".equals(videoAction)) {
-                    videoAction = "do";
-                    Log.d(TAG, "[融合] 视频动作类型 oral -> do");
-                }
-                if ("oral".equals(audioAction)) {
-                    audioAction = "do";
-                    Log.d(TAG, "[融合] 音频动作类型 oral -> do");
-                }
+                // 注：oral/sex 的归并已在各分析线程内完成（分组概率决策只输出 "do"/"Noise"/""），
+                // 此处无需再做 oral->do 归一化。
 
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
+
+                // [假启动抑制] 启动旋转需要视频侧证据背书，音频单独只能“维持”不能立即“启动”
+                finalAction = applyDoStartGate(finalAction, videoAction, videoConf);
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
                 int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
@@ -754,6 +749,16 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 actionHistory.poll();
             }
 
+            // [快通道] 音视频本 tick 一致且双双高置信度 -> 绕过投票直接输出。
+            // 停转方向仍有蓝牙状态机兜底（稳定 1000ms + 最短持续 2000ms）。
+            if (!videoAction.isEmpty() && videoAction.equals(audioAction)
+                    && videoConf >= FUSION_FASTPATH_VIDEO_CONF
+                    && audioConf >= FUSION_FASTPATH_AUDIO_CONF) {
+                Log.d(TAG, String.format("[平滑融合] 快通道命中: %s (V:%.2f, A:%.2f)",
+                        videoAction, videoConf, audioConf));
+                return videoAction;
+            }
+
             if (actionHistory.size() < 3) {
                 return selectBestAction(videoAction, audioAction, videoConf, audioConf);
             }
@@ -796,7 +801,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 float score = entry.getValue();
                 int count = actionCounts.getOrDefault(action, 0);
 
-                if (count >= 3 && score > bestScore) {
+                if (count >= SMOOTH_MIN_COUNT && score > bestScore) {
                     bestScore = score;
                     bestAction = action;
                 }
@@ -810,6 +815,51 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
             return bestAction;
         }
+    }
+
+    /**
+     * [假启动抑制] 对融合结果为 "do" 的启动过程加视频侧门控；仅影响“从非 do 状态启动 do”，
+     * 已处于 do 状态时（维持阶段）音频可以单独维持，不做任何限制。
+     * 规则与离线模式 VideoProcessActivity#applyDoStartGate 完全一致：
+     * 1. 最新视频结果为高置信度 "Noise"（剧情）时，否决本次启动；
+     * 2. 平滑窗口内完全没有视频 "do" 证据时，要求音频连续 AUDIO_ONLY_START_TICKS 个
+     *    融合 tick 判 "do" 才放行；
+     * 3. 被拦下时返回 ""（本 tick 不驱动蓝牙状态机，维持现状）。
+     */
+    private String applyDoStartGate(String finalAction, String videoAction, float videoConf) {
+        if (!"do".equals(finalAction)) {
+            audioOnlyDoStreak = 0;
+            return finalAction;
+        }
+        // 维持阶段：当前蓝牙状态已是 do，音频单独维持即可
+        if (isSexAction(currentBluetoothState)) {
+            audioOnlyDoStreak = 0;
+            return finalAction;
+        }
+        // 启动阶段规则 1：视频高置信度判剧情 -> 否决
+        if ("Noise".equals(videoAction) && videoConf >= VIDEO_PLOT_VETO_CONF) {
+            audioOnlyDoStreak = 0;
+            Log.d(TAG, String.format("[启动门控] 视频高置信度剧情(%.2f)，否决本次 do 启动", videoConf));
+            return "";
+        }
+        // 启动阶段规则 2：窗口内有视频 do 证据 -> 放行
+        synchronized (historyLock) {
+            for (ActionRecord record : actionHistory) {
+                if ("do".equals(record.videoAction)) {
+                    audioOnlyDoStreak = 0;
+                    return finalAction;
+                }
+            }
+        }
+        // 纯音频启动：需要连续多个 tick 支持
+        audioOnlyDoStreak++;
+        if (audioOnlyDoStreak >= AUDIO_ONLY_START_TICKS) {
+            Log.d(TAG, "[启动门控] 纯音频 do 已连续 " + audioOnlyDoStreak + " tick，放行启动");
+            return finalAction;
+        }
+        Log.d(TAG, String.format("[启动门控] 纯音频 do (%d/%d tick)，暂不启动",
+                audioOnlyDoStreak, AUDIO_ONLY_START_TICKS));
+        return "";
     }
 
     private String selectBestAction(String videoAction, String audioAction, float videoConf, float audioConf) {
@@ -1098,6 +1148,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         synchronized (historyLock) {
             actionHistory.clear();
         }
+        // [启动门控] 重置纯音频启动计数
+        audioOnlyDoStreak = 0;
 
         // 清空蓝牙控制动作缓存
         currentBluetoothState = "";

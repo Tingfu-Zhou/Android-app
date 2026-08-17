@@ -57,9 +57,12 @@ public class AudioInferenceHelper {
     public class AudioInferenceResult {
         public final int index;
         public final float confidence;
-        public AudioInferenceResult(int index, float confidence) {
+        // 三分类完整概率 [sex, oral, noise]，供分组概率决策使用；无效结果时为空数组
+        public final float[] probs;
+        public AudioInferenceResult(int index, float confidence, float[] probs) {
             this.index = index;
             this.confidence = confidence;
+            this.probs = probs != null ? probs : new float[0];
         }
     }
 
@@ -72,7 +75,7 @@ public class AudioInferenceHelper {
     public AudioInferenceResult predict(float[] audioBuffer) {
         if (audioBuffer.length != INPUT_LENGTH) {
             Log.e(TAG, "音频输入长度不正确，期望: " + INPUT_LENGTH + "，实际: " + audioBuffer.length);
-            return new AudioInferenceResult(-1, 0f);
+            return new AudioInferenceResult(-1, 0f, null);
         }
         Log.d(TAG, "AudioInferenceHelper: 开始推理 ");
 
@@ -115,7 +118,7 @@ public class AudioInferenceHelper {
                 bestIndex = i;
             }
         }
-        return new AudioInferenceResult(bestIndex, maxScore);
+        return new AudioInferenceResult(bestIndex, maxScore, scores.clone());
 
     }
 
