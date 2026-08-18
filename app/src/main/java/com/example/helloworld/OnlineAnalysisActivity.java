@@ -103,10 +103,15 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     // [快通道] 音视频同一 tick 一致且双双高置信度时，绕过投票直接输出
     private static final float FUSION_FASTPATH_VIDEO_CONF = 0.70f;
     private static final float FUSION_FASTPATH_AUDIO_CONF = 0.70f;
-    // [假启动抑制] 音频单独不能立即启动旋转（参数与离线模式一致）
-    private static final float VIDEO_PLOT_VETO_CONF = 0.70f;
-    private static final int AUDIO_ONLY_START_TICKS = 3;
-    private int audioOnlyDoStreak = 0; // 连续纯音频 do 的融合 tick 计数（仅主线程融合循环访问）
+    // [启动仲裁] 实测音频模型准确度高于视频模型，视频不对启动拥有否决权，
+    // 只在“视频剧情证据明显强于音频 do 证据”时短暂延迟启动（参数与离线模式一致）
+    private static final float VIDEO_PLOT_CONFLICT_CONF = 0.80f;
+    private static final float FUSION_CONFLICT_MARGIN = 0.15f;
+    private static final int CONFLICT_MAX_HOLD_TICKS = 4;
+    private static final float AUDIO_STRONG_START_CONF = 0.75f;
+    private static final int AUDIO_ONLY_START_TICKS = 2;
+    private int audioOnlyDoStreak = 0;  // 连续纯音频 do 的融合 tick 计数（仅主线程融合循环访问）
+    private int conflictHoldTicks = 0;  // 连续音视频强冲突的 tick 计数（仅主线程融合循环访问）
     private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
     private final Object historyLock = new Object();
 
@@ -656,8 +661,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
 
-                // [假启动抑制] 启动旋转需要视频侧证据背书，音频单独只能“维持”不能立即“启动”
-                finalAction = applyDoStartGate(finalAction, videoAction, videoConf);
+                // [启动仲裁] 音视频强冲突时短暂延迟启动（有上限）；音频足够自信则直接启动
+                finalAction = applyDoStartGate(finalAction, videoAction, videoConf, audioAction, audioConf);
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
                 int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
@@ -818,31 +823,59 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     }
 
     /**
-     * [假启动抑制] 对融合结果为 "do" 的启动过程加视频侧门控；仅影响“从非 do 状态启动 do”，
+     * [启动仲裁] 对融合结果为 "do" 的<b>启动</b>过程做冲突仲裁；仅影响“从非 do 状态启动 do”，
      * 已处于 do 状态时（维持阶段）音频可以单独维持，不做任何限制。
      * 规则与离线模式 VideoProcessActivity#applyDoStartGate 完全一致：
-     * 1. 最新视频结果为高置信度 "Noise"（剧情）时，否决本次启动；
-     * 2. 平滑窗口内完全没有视频 "do" 证据时，要求音频连续 AUDIO_ONLY_START_TICKS 个
-     *    融合 tick 判 "do" 才放行；
-     * 3. 被拦下时返回 ""（本 tick 不驱动蓝牙状态机，维持现状）。
+     * 1. 强冲突延迟：视频判剧情且置信度 ≥ 0.80 并比音频 do 置信度高出 0.15 以上 -> 本 tick 不启动；
+     *    连续冲突超过 CONFLICT_MAX_HOLD_TICKS 后强制放行，避免视频误判永久锁死音频；
+     * 2. 强音频直通：音频 do 置信度 ≥ AUDIO_STRONG_START_CONF -> 立即放行；
+     * 3. 视频证据放行：平滑窗口内存在任一条视频 "do" -> 放行；
+     * 4. 弱证据兜底：以上都不满足时需连续 AUDIO_ONLY_START_TICKS 个 tick 才启动；
+     * 被拦下时返回 ""（本 tick 不驱动蓝牙状态机，维持现状）。
      */
-    private String applyDoStartGate(String finalAction, String videoAction, float videoConf) {
+    private String applyDoStartGate(String finalAction, String videoAction, float videoConf,
+                                    String audioAction, float audioConf) {
         if (!"do".equals(finalAction)) {
             audioOnlyDoStreak = 0;
+            conflictHoldTicks = 0;
             return finalAction;
         }
         // 维持阶段：当前蓝牙状态已是 do，音频单独维持即可
         if (isSexAction(currentBluetoothState)) {
             audioOnlyDoStreak = 0;
+            conflictHoldTicks = 0;
             return finalAction;
         }
-        // 启动阶段规则 1：视频高置信度判剧情 -> 否决
-        if ("Noise".equals(videoAction) && videoConf >= VIDEO_PLOT_VETO_CONF) {
-            audioOnlyDoStreak = 0;
-            Log.d(TAG, String.format("[启动门控] 视频高置信度剧情(%.2f)，否决本次 do 启动", videoConf));
-            return "";
+
+        // 音频本 tick 支持 do 时的置信度；音频不支持 do 则记为 0
+        float audioDoConf = "do".equals(audioAction) ? audioConf : 0f;
+
+        // 规则 1：强冲突延迟（有上限，绝不永久阻塞）
+        boolean strongConflict = "Noise".equals(videoAction)
+                && videoConf >= VIDEO_PLOT_CONFLICT_CONF
+                && (videoConf - audioDoConf) >= FUSION_CONFLICT_MARGIN;
+        if (strongConflict) {
+            conflictHoldTicks++;
+            if (conflictHoldTicks <= CONFLICT_MAX_HOLD_TICKS) {
+                Log.d(TAG, String.format(
+                        "[启动仲裁] 音视频强冲突(V:Noise %.2f vs A:do %.2f)，延迟启动 (%d/%d tick)",
+                        videoConf, audioDoConf, conflictHoldTicks, CONFLICT_MAX_HOLD_TICKS));
+                return "";
+            }
+            Log.d(TAG, String.format(
+                    "[启动仲裁] 强冲突已持续 %d tick 超过上限，按音频优先放行启动", conflictHoldTicks));
+        } else {
+            conflictHoldTicks = 0;
         }
-        // 启动阶段规则 2：窗口内有视频 do 证据 -> 放行
+
+        // 规则 2：强音频直通
+        if (audioDoConf >= AUDIO_STRONG_START_CONF) {
+            audioOnlyDoStreak = 0;
+            Log.d(TAG, String.format("[启动仲裁] 音频 do 置信度 %.2f 达直通门槛，放行启动", audioDoConf));
+            return finalAction;
+        }
+
+        // 规则 3：窗口内有视频 do 证据 -> 放行
         synchronized (historyLock) {
             for (ActionRecord record : actionHistory) {
                 if ("do".equals(record.videoAction)) {
@@ -851,13 +884,14 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 }
             }
         }
-        // 纯音频启动：需要连续多个 tick 支持
+
+        // 规则 4：弱证据兜底，需要连续多个 tick 支持
         audioOnlyDoStreak++;
         if (audioOnlyDoStreak >= AUDIO_ONLY_START_TICKS) {
-            Log.d(TAG, "[启动门控] 纯音频 do 已连续 " + audioOnlyDoStreak + " tick，放行启动");
+            Log.d(TAG, "[启动仲裁] 弱证据 do 已连续 " + audioOnlyDoStreak + " tick，放行启动");
             return finalAction;
         }
-        Log.d(TAG, String.format("[启动门控] 纯音频 do (%d/%d tick)，暂不启动",
+        Log.d(TAG, String.format("[启动仲裁] 弱证据 do (%d/%d tick)，暂不启动",
                 audioOnlyDoStreak, AUDIO_ONLY_START_TICKS));
         return "";
     }
@@ -1148,8 +1182,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         synchronized (historyLock) {
             actionHistory.clear();
         }
-        // [启动门控] 重置纯音频启动计数
+        // [启动仲裁] 重置启动计数
         audioOnlyDoStreak = 0;
+        conflictHoldTicks = 0;
 
         // 清空蓝牙控制动作缓存
         currentBluetoothState = "";

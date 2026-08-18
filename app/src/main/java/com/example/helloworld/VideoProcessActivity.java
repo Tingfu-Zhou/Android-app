@@ -93,12 +93,20 @@ public class VideoProcessActivity extends AppCompatActivity {
     // 停转方向的安全性由蓝牙状态机兜底（do->Noise 仍需稳定 1000ms + 最短持续 2000ms）。
     private static final float FUSION_FASTPATH_VIDEO_CONF = 0.70f;
     private static final float FUSION_FASTPATH_AUDIO_CONF = 0.70f;
-    // [假启动抑制] 音频单独不能立即启动旋转：
-    // 视频高置信度判剧情(Noise)时否决启动；窗口内无视频 do 证据时，
-    // 需要连续 AUDIO_ONLY_START_TICKS 个融合 tick 音频判 do 才允许纯音频启动。
-    private static final float VIDEO_PLOT_VETO_CONF = 0.70f;
-    private static final int AUDIO_ONLY_START_TICKS = 3;
-    private int audioOnlyDoStreak = 0; // 连续纯音频 do 的融合 tick 计数（仅主线程融合循环访问）
+    // [启动仲裁] 实测音频模型准确度高于视频模型，因此视频不对启动拥有否决权，
+    // 只在“视频剧情证据明显强于音频 do 证据”时短暂延迟启动（有硬上限，绝不永久阻塞）。
+    // 冲突判定：videoAction==Noise 且 videoConf >= VIDEO_PLOT_CONFLICT_CONF
+    //           且 (videoConf - audioDoConf) >= FUSION_CONFLICT_MARGIN
+    private static final float VIDEO_PLOT_CONFLICT_CONF = 0.80f;
+    private static final float FUSION_CONFLICT_MARGIN = 0.15f;
+    // 冲突延迟上限：连续冲突超过该 tick 数后仍放行，避免视频误判把音频永久锁死
+    private static final int CONFLICT_MAX_HOLD_TICKS = 4;
+    // 强音频直通：音频 do 置信度达到该值时无需视频背书，直接允许启动
+    private static final float AUDIO_STRONG_START_CONF = 0.75f;
+    // 弱证据兜底：音频 do 但置信度不高、且窗口内无视频 do 证据时，需连续这么多 tick 才启动
+    private static final int AUDIO_ONLY_START_TICKS = 2;
+    private int audioOnlyDoStreak = 0;  // 连续纯音频 do 的融合 tick 计数（仅主线程融合循环访问）
+    private int conflictHoldTicks = 0;  // 连续音视频强冲突的 tick 计数（仅主线程融合循环访问）
     private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
     private final Object historyLock = new Object(); // 用于同步访问actionHistory
 
@@ -766,8 +774,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 7.19 修改：使用平滑融合替代原有的简单融合逻辑
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
 
-                // [假启动抑制] 启动旋转需要视频侧证据背书，音频单独只能“维持”不能立即“启动”
-                finalAction = applyDoStartGate(finalAction, videoAction, videoConf);
+                // [启动仲裁] 音视频强冲突时短暂延迟启动（有上限）；音频足够自信则直接启动
+                finalAction = applyDoStartGate(finalAction, videoAction, videoConf, audioAction, audioConf);
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
                 int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
@@ -956,34 +964,70 @@ public class VideoProcessActivity extends AppCompatActivity {
     }
 
     /**
-     * [假启动抑制] 对融合结果为 "do" 的启动过程加视频侧门控；仅影响“从非 do 状态启动 do”，
+     * [启动仲裁] 对融合结果为 "do" 的<b>启动</b>过程做冲突仲裁；仅影响“从非 do 状态启动 do”，
      * 已处于 do 状态时（维持阶段）音频可以单独维持，不做任何限制。
      *
-     * 规则：
-     * 1. 最新视频结果为高置信度 "Noise"（剧情）时，否决本次启动——专治剧情段配乐/
-     *    喘息配音导致的假启动；
-     * 2. 平滑窗口内完全没有视频 "do" 证据（视频黑暗/遮挡/一直 unclear）时，要求音频
-     *    连续 {@link #AUDIO_ONLY_START_TICKS} 个融合 tick 判 "do" 才放行——纯音频启动
-     *    变慢但仍然可能；
-     * 3. 被拦下时返回 ""（本 tick 不驱动蓝牙状态机，维持现状），不主动发送 Noise。
+     * <p>设计前提：实测音频模型准确度高于视频模型，因此视频<b>不</b>拥有否决权，只能在
+     * 与音频强烈冲突时把启动短暂推迟，且推迟有硬上限。规则按序：</p>
+     * <ol>
+     *   <li><b>强冲突延迟</b>：视频判剧情且置信度 ≥ {@link #VIDEO_PLOT_CONFLICT_CONF}，
+     *       同时比音频的 do 置信度高出 {@link #FUSION_CONFLICT_MARGIN} 以上 -> 本 tick 不启动；
+     *       但连续冲突超过 {@link #CONFLICT_MAX_HOLD_TICKS} 个 tick 后强制放行，
+     *       避免视频持续误判（暗光/特写/非常规机位）把正确的音频永久锁死。</li>
+     *   <li><b>强音频直通</b>：音频 do 置信度 ≥ {@link #AUDIO_STRONG_START_CONF} -> 立即放行，
+     *       不需要视频背书。</li>
+     *   <li><b>视频证据放行</b>：平滑窗口内存在任一条视频 "do" -> 放行。</li>
+     *   <li><b>弱证据兜底</b>：以上都不满足（音频 do 但置信度不高、视频也没有证据）时，
+     *       要求连续 {@link #AUDIO_ONLY_START_TICKS} 个 tick 才启动。</li>
+     * </ol>
+     *
+     * <p>被拦下时返回 ""（本 tick 不驱动蓝牙状态机，维持现状），不主动发送 Noise。
+     * 最坏情况下的启动延迟为 CONFLICT_MAX_HOLD_TICKS + AUDIO_ONLY_START_TICKS = 6 tick（约 3 秒）。</p>
      */
-    private String applyDoStartGate(String finalAction, String videoAction, float videoConf) {
+    private String applyDoStartGate(String finalAction, String videoAction, float videoConf,
+                                    String audioAction, float audioConf) {
         if (!"do".equals(finalAction)) {
             audioOnlyDoStreak = 0;
+            conflictHoldTicks = 0;
             return finalAction;
         }
         // 维持阶段：当前蓝牙状态已是 do，音频单独维持即可
         if (isSexAction(currentBluetoothState)) {
             audioOnlyDoStreak = 0;
+            conflictHoldTicks = 0;
             return finalAction;
         }
-        // 启动阶段规则 1：视频高置信度判剧情 -> 否决
-        if ("Noise".equals(videoAction) && videoConf >= VIDEO_PLOT_VETO_CONF) {
-            audioOnlyDoStreak = 0;
-            Log.d(TAG, String.format("[启动门控] 视频高置信度剧情(%.2f)，否决本次 do 启动", videoConf));
-            return "";
+
+        // 音频本 tick 支持 do 时的置信度；音频不支持 do 则记为 0
+        float audioDoConf = "do".equals(audioAction) ? audioConf : 0f;
+
+        // 规则 1：强冲突延迟（有上限，绝不永久阻塞）
+        boolean strongConflict = "Noise".equals(videoAction)
+                && videoConf >= VIDEO_PLOT_CONFLICT_CONF
+                && (videoConf - audioDoConf) >= FUSION_CONFLICT_MARGIN;
+        if (strongConflict) {
+            conflictHoldTicks++;
+            if (conflictHoldTicks <= CONFLICT_MAX_HOLD_TICKS) {
+                Log.d(TAG, String.format(
+                        "[启动仲裁] 音视频强冲突(V:Noise %.2f vs A:do %.2f)，延迟启动 (%d/%d tick)",
+                        videoConf, audioDoConf, conflictHoldTicks, CONFLICT_MAX_HOLD_TICKS));
+                return "";
+            }
+            // 冲突持续超过上限：视频可能在系统性误判，按“音频更可信”放行
+            Log.d(TAG, String.format(
+                    "[启动仲裁] 强冲突已持续 %d tick 超过上限，按音频优先放行启动", conflictHoldTicks));
+        } else {
+            conflictHoldTicks = 0;
         }
-        // 启动阶段规则 2：窗口内有视频 do 证据 -> 放行
+
+        // 规则 2：强音频直通
+        if (audioDoConf >= AUDIO_STRONG_START_CONF) {
+            audioOnlyDoStreak = 0;
+            Log.d(TAG, String.format("[启动仲裁] 音频 do 置信度 %.2f 达直通门槛，放行启动", audioDoConf));
+            return finalAction;
+        }
+
+        // 规则 3：窗口内有视频 do 证据 -> 放行
         synchronized (historyLock) {
             for (ActionRecord record : actionHistory) {
                 if ("do".equals(record.videoAction)) {
@@ -992,13 +1036,14 @@ public class VideoProcessActivity extends AppCompatActivity {
                 }
             }
         }
-        // 纯音频启动：需要连续多个 tick 支持
+
+        // 规则 4：弱证据兜底，需要连续多个 tick 支持
         audioOnlyDoStreak++;
         if (audioOnlyDoStreak >= AUDIO_ONLY_START_TICKS) {
-            Log.d(TAG, "[启动门控] 纯音频 do 已连续 " + audioOnlyDoStreak + " tick，放行启动");
+            Log.d(TAG, "[启动仲裁] 弱证据 do 已连续 " + audioOnlyDoStreak + " tick，放行启动");
             return finalAction;
         }
-        Log.d(TAG, String.format("[启动门控] 纯音频 do (%d/%d tick)，暂不启动",
+        Log.d(TAG, String.format("[启动仲裁] 弱证据 do (%d/%d tick)，暂不启动",
                 audioOnlyDoStreak, AUDIO_ONLY_START_TICKS));
         return "";
     }
@@ -1306,8 +1351,9 @@ public class VideoProcessActivity extends AppCompatActivity {
                 actionHistory.clear();
                 Log.d(TAG, "[平滑融合] 清空历史记录（因为seek操作）");
             }
-            // [启动门控] seek 后重置纯音频启动计数
+            // [启动仲裁] seek 后重置启动计数
             audioOnlyDoStreak = 0;
+            conflictHoldTicks = 0;
 
             // 重置提取器, 通知视频帧抽取器：从当前时间开始解码
             videoFrameExtractor.seekTo(currentMs * 1000);
@@ -1475,8 +1521,9 @@ public class VideoProcessActivity extends AppCompatActivity {
         synchronized (historyLock) {
             actionHistory.clear();
         }
-        // [启动门控] 重置纯音频启动计数
+        // [启动仲裁] 重置启动计数
         audioOnlyDoStreak = 0;
+        conflictHoldTicks = 0;
 
         audioStartTime = newPositionMs;
 
